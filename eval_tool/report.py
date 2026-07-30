@@ -82,11 +82,16 @@ def write_reports(
                 "prediction",
                 "hit",
                 "quality_score",
+                "accuracy_score",
+                "equipment_correct",
+                "applicable_dims",
+                "failure_type",
                 "param_score",
                 "fact_score",
                 "visual_score",
                 "fabrication_score",
                 "style_score",
+                "relevance_score",
                 "judge_reason",
             )
             if col in all_details.columns

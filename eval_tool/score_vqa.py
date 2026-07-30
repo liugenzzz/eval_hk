@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import random
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any
@@ -52,6 +54,28 @@ def _tqdm(iterable: Any, **kwargs: Any) -> Any:
         return iterable
 
 
+# Every per-row column the judge can produce, across all rubric versions. Listing them
+# in one place means adding a rubric dimension no longer means editing five hardcoded
+# dicts -- the previous shape silently dropped any field a new rubric introduced.
+SCORE_COLUMNS = (
+    "quality_score",       # every rubric version normalizes onto 0-100 here
+    "accuracy_score",      # v4: weighted accuracy before the fabrication multiplier
+    "equipment_correct",   # v1/v4: platform identification, a hard cap in v4
+    "applicable_dims",     # v2/v3/v4: which nullable dimensions applied to this row
+    "failure_type",        # v1: failure attribution, does not affect the score
+    "param_score",
+    "fact_score",
+    "visual_score",
+    "fabrication_score",
+    "style_score",         # v2/v4
+    "relevance_score",     # v3
+)
+
+
+def _empty_scores() -> dict[str, Any]:
+    return {col: None for col in SCORE_COLUMNS}
+
+
 def _judge_pointwise_with_retry(
     client: JudgeClient,
     row: dict[str, Any],
@@ -59,31 +83,22 @@ def _judge_pointwise_with_retry(
 ) -> dict[str, Any]:
     question = format_history_for_judge(parse_history_cell(row.get("history")), row.get("question", ""))
     last_err = ""
-    for _ in range(client.settings.max_retries):
+    for attempt in range(client.settings.max_retries):
         try:
             result = client.judge_pointwise(question, row.get("answer", ""), row.get("prediction", ""), image_b64)
-            return {
-                "hit": result["hit"],
-                "judge_reason": result["reason"],
-                "quality_score": result.get("quality_score"),
-                "param_score": result.get("param_score"),
-                "fact_score": result.get("fact_score"),
-                "visual_score": result.get("visual_score"),
-                "fabrication_score": result.get("fabrication_score"),
-                "style_score": result.get("style_score"),
-            }
+            out = {"hit": result["hit"], "judge_reason": result["reason"]}
+            out.update({col: result.get(col) for col in SCORE_COLUMNS})
+            return out
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {exc}"
-    return {
-        "hit": 0,
-        "judge_reason": f"[judge_error] {last_err}",
-        "quality_score": None,
-        "param_score": None,
-        "fact_score": None,
-        "visual_score": None,
-        "fabrication_score": None,
-        "style_score": None,
-    }
+            if attempt < client.settings.max_retries - 1:
+                # exponential backoff with jitter: 32 workers retrying instantly turns a
+                # transient overload on the judge endpoint into a self-inflicted storm
+                time.sleep(min(8.0, 0.5 * 2 ** attempt) * (0.5 + random.random()))
+    # hit=None, not 0: a judge failure is missing data, not a wrong answer by the model.
+    # dropna() in the aggregation excludes it; scoring it 0 would deflate the mean and,
+    # if the two models fail at different rates, bias the comparison directionally.
+    return {"hit": None, "judge_reason": f"[judge_error] {last_err}", **_empty_scores()}
 
 
 def score_pointwise_vqa(
@@ -104,9 +119,10 @@ def score_pointwise_vqa(
         idx = str(row.get("index", i))
         prediction = row.get("prediction", "")
         if pd.isna(prediction) or str(prediction).strip() == "":
-            results[idx] = {"hit": 0, "judge_reason": "[missing_prediction]"}
+            results[idx] = {"hit": None, "judge_reason": "[missing_prediction]", **_empty_scores()}
             continue
-        key = {"model": model_name, "dataset": "vqa", "index": idx}
+        key = {"judge_fp": client.settings.fingerprint, "model": model_name,
+               "dataset": "vqa", "index": idx}
         cached = cache.get(key) if cache else None
         if cached is not None:
             results[idx] = cached
@@ -126,41 +142,32 @@ def score_pointwise_vqa(
             idx, _ = futures[fut]
             result = fut.result()
             results[idx] = result
-            if cache:
-                cache.set({"model": model_name, "dataset": "vqa", "index": idx}, result)
+            # never cache a judge failure -- cache.set is append-only, so a single
+            # timeout would be frozen in as a permanent score that reruns won't fix
+            if cache and not str(result.get("judge_reason", "")).startswith("[judge_error]"):
+                cache.set({"judge_fp": client.settings.fingerprint, "model": model_name,
+                           "dataset": "vqa", "index": idx}, result)
 
-    hits = []
-    reasons = []
-    quality_scores = []
-    param_scores = []
-    fact_scores = []
-    visual_scores = []
-    fabrication_scores = []
-    style_scores = []
+    hits: list[float | None] = []
+    reasons: list[str] = []
+    columns: dict[str, list[Any]] = {col: [] for col in SCORE_COLUMNS}
     aux = []
     for i, row in enumerate(rows):
         idx = str(row.get("index", i))
-        result = results.get(idx, {"hit": 0, "judge_reason": "[missing_result]"})
-        # hit may be a 0/1 legacy/thresholded verdict or a 0-1 weighted quality score
-        # (see judge.parse_pointwise_judge) -- must stay float, int() would truncate
-        # any fractional weighted score down to 0.
-        hits.append(float(result.get("hit", 0)))
+        result = results.get(idx, {"hit": None, "judge_reason": "[missing_result]"})
+        # hit is float-or-None across rubric versions: 0/1 for the binary and thresholded
+        # rubrics, a fractional 0-1 quality score for the 1-5 weighted one, and None when
+        # the judge failed. Never int() it -- that floored every fractional score to 0.
+        raw_hit = result.get("hit")
+        hits.append(None if raw_hit is None else float(raw_hit))
         reasons.append(str(result.get("judge_reason", "")))
-        quality_scores.append(result.get("quality_score"))
-        param_scores.append(result.get("param_score"))
-        fact_scores.append(result.get("fact_score"))
-        visual_scores.append(result.get("visual_score"))
-        fabrication_scores.append(result.get("fabrication_score"))
-        style_scores.append(result.get("style_score"))
+        for col in SCORE_COLUMNS:
+            columns[col].append(result.get(col))
         aux.append(aux_metrics(row.get("answer", ""), row.get("prediction", "")))
     scored["hit"] = hits
     scored["judge_reason"] = reasons
-    scored["quality_score"] = quality_scores
-    scored["param_score"] = param_scores
-    scored["visual_score"] = visual_scores
-    scored["fabrication_score"] = fabrication_scores
-    scored["fact_score"] = fact_scores
-    scored["style_score"] = style_scores
+    for col, values in columns.items():
+        scored[col] = values
     for col in ("bleu1", "bleu2", "rouge_l", "pred_len"):
         scored[col] = [m[col] for m in aux]
     return scored
@@ -206,7 +213,8 @@ def score_pairwise_vs_baseline(
     for _, row in merged.iterrows():
         idx = str(row["index"])
         for direction in ("forward", "reverse"):
-            key = {"model_A": model_name, "model_B": baseline_model, "index": idx, "direction": direction}
+            key = {"judge_fp": client.settings.fingerprint, "model_A": model_name,
+                   "model_B": baseline_model, "index": idx, "direction": direction}
             cached = cache.get(key) if cache else None
             if cached is not None:
                 raw[(idx, direction)] = cached
@@ -240,8 +248,10 @@ def score_pairwise_vs_baseline(
             idx, direction = futures[fut]
             result = fut.result()
             raw[(str(idx), direction)] = result
-            if cache:
-                cache.set({"model_A": model_name, "model_B": baseline_model, "index": str(idx), "direction": direction}, result)
+            if cache and not str(result.get("reason", "")).startswith("[judge_error]"):
+                cache.set({"judge_fp": client.settings.fingerprint, "model_A": model_name,
+                           "model_B": baseline_model, "index": str(idx),
+                           "direction": direction}, result)
 
     rows: list[dict[str, Any]] = []
     for _, row in merged.iterrows():

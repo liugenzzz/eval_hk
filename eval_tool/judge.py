@@ -1,13 +1,32 @@
 from __future__ import annotations
 
+import hashlib
 import json
-import re
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 from .imaging import decode_image_cell
+# All rubric parsing lives in judge_rubrics: the four current versions (v1/v2/v3/v4) plus
+# the two retired formats, so rows scored before the rewrite still read back with the
+# semantics they were scored under. Dispatch is on the "rubric" tag the prompts emit,
+# with key-presence inference as the fallback for untagged output.
+from .judge_rubrics import PASS_THRESHOLD, extract_json_object, parse_pointwise
 from .prompts import PAIRWISE_JUDGE_PROMPT, VQA_JUDGE_PROMPT
+
+_extract_json_object = extract_json_object
+parse_pointwise_judge = parse_pointwise
+
+# Retained so existing imports keep working; the live weights are in judge_rubrics.
+PARAM_WEIGHT = 0.50
+FACT_WEIGHT = 0.35
+STYLE_WEIGHT = 0.15
+PARAM_WEIGHT_100 = 0.35
+FACT_WEIGHT_100 = 0.25
+VISUAL_WEIGHT_100 = 0.15
+FABRICATION_WEIGHT_100 = 0.15
+STYLE_WEIGHT_100 = 0.10
+PASS_THRESHOLD_100 = PASS_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -21,114 +40,22 @@ class JudgeSettings:
     pointwise_prompt: str = VQA_JUDGE_PROMPT
     pairwise_prompt: str = PAIRWISE_JUDGE_PROMPT
 
+    @property
+    def fingerprint(self) -> str:
+        """Identity of this judge configuration.
 
-def _extract_json_object(content: str) -> dict[str, Any]:
-    text = str(content or "").strip()
-    text = re.sub(r"^```(?:json)?", "", text).strip()
-    text = re.sub(r"```$", "", text).strip()
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match:
-        text = match.group(0)
-    return json.loads(text)
-
-
-extract_json_object = _extract_json_object
-
-
-# Dimension weights for the 1-5 weighted pointwise rubric (judge_equip_pointwise_weighted.txt):
-# 参数(param) 最重要 > 事实(fact) > 表达(style)。三者在 1-5 分尺度上加权，
-# 再除以 5 归一化到 [0,1]，写入下游沿用已久的 "hit" 列（下游报表/bootstrap
-# 只对 hit 取 mean，不关心它是二值还是连续值，所以整条报表管线不用改）。
-PARAM_WEIGHT = 0.5
-FACT_WEIGHT = 0.35
-STYLE_WEIGHT = 0.15
-
-# Dimension weights for the 100-point 5-axis rubric (judge_equip_pointwise_100.txt).
-# Each dimension is scored 0-100, weighted-summed to a 0-100 quality score, then
-# thresholded to a binary hit — internally graded, externally still 0/1.
-PARAM_WEIGHT_100 = 0.35
-FACT_WEIGHT_100 = 0.25
-VISUAL_WEIGHT_100 = 0.15
-FABRICATION_WEIGHT_100 = 0.15
-STYLE_WEIGHT_100 = 0.10
-PASS_THRESHOLD_100 = 60  # quality_score >= 60 -> hit = 1
-
-
-def _score_1_to_5(value: object, field: str) -> float:
-    score = float(value)  # raises TypeError/ValueError on missing/non-numeric -> caller retries as judge_error
-    if not (1 <= score <= 5):
-        raise ValueError(f"{field}={value!r} out of range [1,5]")
-    return score
-
-
-def _score_0_to_100(value: object, field: str) -> float:
-    score = float(value)  # raises TypeError/ValueError on missing/non-numeric -> caller retries as judge_error
-    if not (0 <= score <= 100):
-        raise ValueError(f"{field}={value!r} out of range [0,100]")
-    return score
-
-
-def parse_pointwise_judge(content: str) -> dict[str, object]:
-    """Parse a pointwise judge response. Supports three formats:
-    - 100-point 5-axis rubric: {"param_score", "fact_score", "visual_score",
-      "fabrication_score", "style_score", "reasoning"} (0-100 each) -> weighted-summed
-      to a 0-100 "quality_score", then thresholded (>=60) to a binary "hit".
-    - 1-5 weighted rubric: {"param_score", "fact_score", "style_score", "reasoning"} (1-5 each)
-      -> "hit" becomes the weighted, 0-1-normalized quality score.
-    - legacy binary: {"correct": true/false, "reason": "..."} -> "hit" is 0 or 1.
-    Always returns {"hit", "reason", "quality_score", "param_score", "fact_score",
-    "visual_score", "fabrication_score", "style_score"} (fields the format doesn't
-    produce are None).
-    """
-    obj = _extract_json_object(content)
-    if "visual_score" in obj or "fabrication_score" in obj:
-        param = _score_0_to_100(obj["param_score"], "param_score")
-        fact = _score_0_to_100(obj["fact_score"], "fact_score")
-        visual = _score_0_to_100(obj["visual_score"], "visual_score")
-        fabrication = _score_0_to_100(obj["fabrication_score"], "fabrication_score")
-        style = _score_0_to_100(obj["style_score"], "style_score")
-        quality = (
-            PARAM_WEIGHT_100 * param
-            + FACT_WEIGHT_100 * fact
-            + VISUAL_WEIGHT_100 * visual
-            + FABRICATION_WEIGHT_100 * fabrication
-            + STYLE_WEIGHT_100 * style
-        )
-        return {
-            "hit": 1 if quality >= PASS_THRESHOLD_100 else 0,
-            "reason": str(obj.get("reasoning", obj.get("reason", ""))),
-            "quality_score": round(quality, 2),
-            "param_score": param,
-            "fact_score": fact,
-            "visual_score": visual,
-            "fabrication_score": fabrication,
-            "style_score": style,
-        }
-    if "param_score" in obj or "fact_score" in obj or "style_score" in obj:
-        param = _score_1_to_5(obj["param_score"], "param_score")
-        fact = _score_1_to_5(obj["fact_score"], "fact_score")
-        style = _score_1_to_5(obj["style_score"], "style_score")
-        weighted = PARAM_WEIGHT * param + FACT_WEIGHT * fact + STYLE_WEIGHT * style
-        return {
-            "hit": round(weighted / 5.0, 4),
-            "reason": str(obj.get("reasoning", obj.get("reason", ""))),
-            "quality_score": None,
-            "param_score": param,
-            "fact_score": fact,
-            "visual_score": None,
-            "fabrication_score": None,
-            "style_score": style,
-        }
-    return {
-        "hit": 1 if obj.get("correct") is True else 0,
-        "reason": str(obj.get("reason", "")),
-        "quality_score": None,
-        "param_score": None,
-        "fact_score": None,
-        "visual_score": None,
-        "fabrication_score": None,
-        "style_score": None,
-    }
+        Fold this into the cache key and switching rubric versions re-scores instead of
+        silently returning verdicts produced by the previous prompt. Without it the cache
+        key is only (model, dataset, index), so changing the rubric changes nothing --
+        which makes comparing rubric versions impossible.
+        """
+        blob = "|".join([
+            self.model,
+            f"{self.temperature:.3f}",
+            hashlib.sha256(self.pointwise_prompt.encode("utf-8")).hexdigest()[:12],
+            hashlib.sha256(self.pairwise_prompt.encode("utf-8")).hexdigest()[:12],
+        ])
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def parse_pairwise_judge(content: str) -> tuple[str, str]:

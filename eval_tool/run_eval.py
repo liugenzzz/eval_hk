@@ -25,8 +25,20 @@ def run(config: EvalConfig) -> dict[str, Path]:
     }
     image_map = image_map_from_truth(truth.get("vqa", pd.DataFrame()))
     judge_client = JudgeClient(config.judge)
-    pointwise_cache = JsonlCache(config.cache_dir / "judge_cache_pointwise.jsonl", ("model", "dataset", "index"))
-    pairwise_cache = JsonlCache(config.cache_dir / "judge_cache_pairwise.jsonl", ("model_A", "model_B", "index", "direction"))
+    # judge_fp first: it is a hash of the judge model, temperature and both prompt texts,
+    # so switching rubric versions misses the cache and re-scores instead of silently
+    # replaying verdicts from the previous prompt. Rows written before this existed have
+    # no judge_fp and fail to match, which is the intended behaviour -- they were scored
+    # under a different rubric and are not comparable.
+    pointwise_cache = JsonlCache(
+        config.cache_dir / "judge_cache_pointwise.jsonl",
+        ("judge_fp", "model", "dataset", "index"),
+    )
+    pairwise_cache = JsonlCache(
+        config.cache_dir / "judge_cache_pairwise.jsonl",
+        ("judge_fp", "model_A", "model_B", "index", "direction"),
+    )
+    print(f"[judge] model={config.judge.model} fingerprint={config.judge.fingerprint}", flush=True)
     details: list[pd.DataFrame] = []
     vqa_by_model: dict[str, pd.DataFrame] = {}
     warnings: list[str] = []

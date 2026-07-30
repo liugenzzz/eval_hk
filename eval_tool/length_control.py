@@ -24,7 +24,10 @@ def pointwise_length_control(
 
     frame = data[["model", "hit", "pred_len"]].dropna().copy()
     frame["model"] = frame["model"].astype(str)
-    frame["hit"] = frame["hit"].astype(int)
+    # NOT astype(int): the 1-5 weighted rubric returns a fractional 0-1 hit, and int()
+    # floored every one of them to 0, leaving Logit a single-class y -> exception ->
+    # silent fallback to the raw mean. Length control looked on and was off.
+    frame["hit"] = frame["hit"].astype(float)
     frame["pred_len"] = frame["pred_len"].astype(float)
     dummies = pd.get_dummies(frame["model"], prefix="model", dtype=float)
     baseline_col = f"model_{baseline_model}"
@@ -36,9 +39,14 @@ def pointwise_length_control(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            fit = sm.Logit(y, x).fit(disp=False)
+            if set(y.unique()) <= {0.0, 1.0}:
+                fit = sm.Logit(y, x).fit(disp=False)
+            else:
+                # continuous score in [0,1] -> Binomial GLM with the logit link handles a
+                # fractional response natively; Logit would reject it
+                fit = sm.GLM(y, x, family=sm.families.Binomial()).fit()
     except Exception as exc:
-        return _raw_pointwise(data, f"logit_failed:{type(exc).__name__}")
+        return _raw_pointwise(data, f"fit_failed:{type(exc).__name__}")
 
     ref_len = float(frame["pred_len"].mean())
     rows: list[dict[str, object]] = []
