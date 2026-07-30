@@ -116,8 +116,30 @@ def make_cross_tables(details: pd.DataFrame) -> dict[str, pd.DataFrame]:
     return tables
 
 
-def make_weighted_score_summary(details: pd.DataFrame, category_weights: dict[str, float]) -> pd.DataFrame:
-    """One row per model: weighted total score plus each category's raw score, pooled across all enabled datasets."""
+MIN_CATEGORY_N = 30
+"""Categories with fewer rows than this are excluded from total_score.
+
+Without a gate, category_weights.get(cat, 1.0) gives every category equal weight
+regardless of size, so a category holding 2 rows and one holding 200 each contribute half
+the headline number -- each of those 2 rows carries 100x the weight of a single-turn row,
+and a 2/2 result (an ordinary coin flip landing twice) pins 50% of the total at 1.0.
+The category is still reported on its own row; it just stops driving the total."""
+
+
+def make_weighted_score_summary(
+    details: pd.DataFrame,
+    category_weights: dict[str, float],
+    min_category_n: int = MIN_CATEGORY_N,
+) -> pd.DataFrame:
+    """One row per model: weighted total score plus each category's raw score and n.
+
+    Emits three totals so a size-imbalanced split cannot hide behind one number:
+      total_score        -- category-weighted over categories with >= min_category_n rows
+      total_score_by_n   -- sample-weighted over every row, ignoring category weights
+      total_score_ungated-- the old behaviour, every category weighted equally
+    When the first two disagree materially, the split is imbalanced and the category
+    weights are doing more work than the data supports.
+    """
     if details.empty or not {"model", "category", "hit"}.issubset(details.columns):
         return pd.DataFrame()
     rows: list[dict[str, object]] = []
@@ -129,11 +151,26 @@ def make_weighted_score_summary(details: pd.DataFrame, category_weights: dict[st
             if len(values):
                 cat_scores[str(category)] = round(float(values.mean()), 4)
                 cat_n[str(category)] = int(len(values))
-        weight_sum = sum(category_weights.get(cat, 1.0) for cat in cat_scores)
-        weighted_total = sum(category_weights.get(cat, 1.0) * score for cat, score in cat_scores.items())
+
+        counted = {c: s for c, s in cat_scores.items() if cat_n[c] >= min_category_n}
+        dropped = sorted(c for c in cat_scores if c not in counted)
+
+        def _weighted(scores: dict[str, float]) -> float:
+            w_sum = sum(category_weights.get(c, 1.0) for c in scores)
+            if not w_sum:
+                return math.nan
+            return sum(category_weights.get(c, 1.0) * s for c, s in scores.items()) / w_sum
+
+        total_n = sum(cat_n.values())
         row: dict[str, object] = {
             "model": str(model),
-            "total_score": round(weighted_total / weight_sum, 4) if weight_sum else math.nan,
+            "total_score": round(_weighted(counted), 4) if counted else math.nan,
+            "total_score_by_n": (round(sum(cat_scores[c] * cat_n[c] for c in cat_scores) / total_n, 4)
+                                 if total_n else math.nan),
+            "total_score_ungated": round(_weighted(cat_scores), 4) if cat_scores else math.nan,
+            "n_total": int(total_n),
+            "categories_in_total": ",".join(sorted(counted)),
+            "categories_excluded_small_n": ",".join(f"{c}(n={cat_n[c]})" for c in dropped),
         }
         for category in sorted(cat_scores):
             row[category] = cat_scores[category]
