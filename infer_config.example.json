@@ -1,0 +1,21 @@
+{
+  "infer": {
+    "model_name": "base",
+    "model_path": "F:/path/to/Qwen2.5-VL-or-Qwen3-VL",
+    "tsv_dir": "F:/path/to/LMUData",
+    "out_dir": "F:/path/to/work_dir/base",
+    "datasets": {
+      "vqa": "aero_vqa"
+    },
+    "prompt_files": {
+      "vqa": "prompts/infer_vqa_raw.txt"
+    },
+    "max_new_tokens": 1024,
+    "batch_size": 1,
+    "torch_dtype": "auto",
+    "device_map": "auto",
+    "gpu_ids": [],
+    "workers_per_gpu": 1,
+    "overwrite": true
+  }
+}

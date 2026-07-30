@@ -1,0 +1,10 @@
+pandas
+openpyxl
+numpy
+statsmodels
+tqdm
+pytest
+torch
+transformers
+accelerate
+Pillow

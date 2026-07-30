@@ -1,0 +1,39 @@
+{
+  "tsv_dir": "F:/path/to/LMUData",
+  "out_dir": "eval_report",
+  "cache_dir": "eval_cache",
+  "datasets": {
+    "vqa": "aero_vqa"
+  },
+  "models": [
+    {
+      "name": "base",
+      "vqa": "F:/path/to/work_dir/base/base_aero_vqa.xlsx"
+    },
+    {
+      "name": "sft_ep1",
+      "vqa": "F:/path/to/work_dir/sft_ep1/sft_ep1_aero_vqa.xlsx"
+    }
+  ],
+  "baseline_model": "base",
+  "enabled_datasets": ["vqa"],
+  "judge": {
+    "api_base": "http://192.168.48.7:18180/v1/chat/completions",
+    "api_key": "sk-local",
+    "model": "qwen3.6-27b",
+    "temperature": 0.0,
+    "timeout": 120,
+    "max_retries": 3,
+    "prompt_files": {
+      "pointwise": "prompts/judge_equip_pointwise_100.txt",
+      "pairwise": "prompts/judge_equip_pairwise.txt"
+    }
+  },
+  "max_workers": 32,
+  "do_pointwise": true,
+  "do_pairwise": true,
+  "do_length_control": true,
+  "mcq_llm_extract_fallback": false,
+  "bootstrap_n": 1000,
+  "seed": 42
+}
