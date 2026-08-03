@@ -1,5 +1,24 @@
 # 独立多模型 VLM 评估打分工具
 
+## 统一入口（推荐）
+
+复制 `pipeline.example.json` 为 `pipeline.json`，在一份配置里填写数据、多个模型、推理和裁判参数：
+
+```bash
+python -m eval_tool convert data.json --config pipeline.json
+python -m eval_tool infer --config pipeline.json
+python -m eval_tool eval --config pipeline.json --rubric v4
+python -m eval_tool sweep --config pipeline.json --rubrics v1,v3,v4,v4b
+python -m eval_tool all --config pipeline.json
+```
+
+- 推理默认断点续传；只有显式 `--overwrite` 才会从头跑。推理指纹变化时会报错，不会自动触发几小时的 GPU 重跑。
+- 每个 batch 写入 `work_dir/<model>/_partial/*.jsonl`；默认保留以便核查，完成后可用 `--clean-partial` 清理。
+- 评估输入优先级为 `models[].scored > models[].pred > 约定推理路径`。`sweep` 为了保证 rubric 可验证，拒绝使用 `scored`。
+- 多模型和多 rubric 按配置顺序串行。`sweep` 的比较表会覆盖每个 challenger，不只是第一个。
+
+旧入口仍保留：`python -m eval_tool.run_infer --config infer_config.json`、`python -m eval_tool.run_eval --config config.json`，以及无子命令的 `python -m eval_tool --config config.json`。
+
 > **评估装备描述开放问答(ShareGPT JSON 数据、只跑 vqa)请看《开放问答评估_使用说明.md》**,那是当前主用通路。本 README 描述的是原有 mcq/judge/vqa 三数据集流程,部分提示词/配置示例(P1-R3 能力分类等)不适用于开放问答通路。
 
 这是一个两段式 Python 命令行工具：

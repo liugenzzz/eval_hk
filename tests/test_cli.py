@@ -231,3 +231,21 @@ def test_run_rubric_shim_calls_new_cli(monkeypatch):
             "--no-pairwise",
         ]
     ]
+
+
+@pytest.mark.parametrize("command", ["convert", "infer", "eval", "sweep", "all"])
+def test_each_subcommand_has_help(command):
+    with pytest.raises(SystemExit) as exc_info:
+        main([command, "--help"])
+
+    assert exc_info.value.code == 0
+
+
+def test_top_level_help_lists_unified_subcommands(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    for command in ("convert", "infer", "eval", "sweep", "all"):
+        assert command in output

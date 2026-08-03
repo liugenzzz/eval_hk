@@ -210,6 +210,8 @@ HANDLERS: dict[str, Callable[[argparse.Namespace], Any]] = {
 
 def main(argv: list[str] | None = None) -> Any:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments in (["-h"], ["--help"]):
+        return build_parser().parse_args(arguments)
     if not arguments or arguments[0] not in SUBCOMMANDS:
         return legacy_eval_main(arguments)
     parser = build_parser()
