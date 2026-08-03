@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from eval_tool.artifacts import ArtifactLayout
-from eval_tool.config import ConfigError, is_pipeline_config, load_pipeline_config
+from eval_tool.config import (
+    ConfigError,
+    is_pipeline_config,
+    load_config,
+    load_pipeline_config,
+)
 
 
 def _write_pipeline(tmp_path, *, models=None, **overrides):
@@ -235,3 +240,12 @@ def test_pipeline_example_is_complete_and_parseable():
     assert config.infer.max_new_tokens == 1024
     assert config.judge.api_key == "sk-local"
     assert config.to_infer_configs()[0].resume is True
+
+
+def test_legacy_example_references_existing_prompts():
+    example_path = Path(__file__).parents[1] / "config.example.json"
+
+    config = load_config(example_path)
+
+    assert config.judge.pointwise_prompt
+    assert config.judge.pairwise_prompt

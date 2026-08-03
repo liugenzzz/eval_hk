@@ -25,7 +25,7 @@
     "timeout": 120,
     "max_retries": 3,
     "prompt_files": {
-      "pointwise": "prompts/judge_equip_pointwise_100.txt",
+      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
       "pairwise": "prompts/judge_equip_pairwise.txt"
     }
   },
