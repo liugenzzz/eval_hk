@@ -17,6 +17,8 @@ def test_load_infer_config_reads_batch_and_gpu_parallel_options(tmp_path):
                     "batch_size": 4,
                     "gpu_ids": [0, 1],
                     "workers_per_gpu": 2,
+                    "resume": True,
+                    "clean_partial": True,
                 }
             }
         ),
@@ -28,3 +30,6 @@ def test_load_infer_config_reads_batch_and_gpu_parallel_options(tmp_path):
     assert config.batch_size == 4
     assert config.gpu_ids == [0, 1]
     assert config.workers_per_gpu == 2
+    assert config.resume is True
+    assert config.clean_partial is True
+    assert config.overwrite is None

@@ -62,11 +62,13 @@ class InferConfig:
     max_new_tokens: int = 512
     batch_size: int = 1
     limit: int | None = None
-    overwrite: bool = True
+    overwrite: bool | None = None
     torch_dtype: str = "auto"
     device_map: str = "auto"
     gpu_ids: list[int] = field(default_factory=list)
     workers_per_gpu: int = 1
+    resume: bool = False
+    clean_partial: bool = False
 
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
@@ -143,6 +145,12 @@ def load_infer_config(path: str | Path) -> InferConfig:
     prompt_files = {str(k): _resolve_path(v, base_dir) for k, v in prompt_files_raw.items()}
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")
     gpu_ids = infer_raw.get("gpu_ids") or infer_raw.get("GPU_IDS") or []
+    if "overwrite" in infer_raw:
+        overwrite = bool(infer_raw["overwrite"])
+    elif "OVERWRITE" in infer_raw:
+        overwrite = bool(infer_raw["OVERWRITE"])
+    else:
+        overwrite = None
     return InferConfig(
         model_name=str(infer_raw.get("model_name") or infer_raw.get("MODEL_NAME")),
         model_path=_resolve_path(infer_raw.get("model_path") or infer_raw.get("MODEL_PATH"), base_dir),
@@ -153,11 +161,15 @@ def load_infer_config(path: str | Path) -> InferConfig:
         max_new_tokens=int(infer_raw.get("max_new_tokens") or infer_raw.get("MAX_NEW_TOKENS") or 512),
         batch_size=max(1, int(infer_raw.get("batch_size") or infer_raw.get("BATCH_SIZE") or 1)),
         limit=int(limit_value) if limit_value else None,
-        overwrite=bool(infer_raw.get("overwrite", infer_raw.get("OVERWRITE", True))),
+        overwrite=overwrite,
         torch_dtype=str(infer_raw.get("torch_dtype") or infer_raw.get("TORCH_DTYPE") or "auto"),
         device_map=str(infer_raw.get("device_map") or infer_raw.get("DEVICE_MAP") or "auto"),
         gpu_ids=[int(x) for x in gpu_ids],
         workers_per_gpu=max(1, int(infer_raw.get("workers_per_gpu") or infer_raw.get("WORKERS_PER_GPU") or 1)),
+        resume=bool(infer_raw.get("resume", infer_raw.get("RESUME", False))),
+        clean_partial=bool(
+            infer_raw.get("clean_partial", infer_raw.get("CLEAN_PARTIAL", False))
+        ),
     )
 
 
