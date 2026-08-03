@@ -4,7 +4,7 @@ import base64
 import io
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 import pandas as pd
 
@@ -35,6 +35,14 @@ DEFAULT_INFER_PROMPTS = {
 class VLGenerator(Protocol):
     def generate(self, prompt: str, image_b64: str | None = None) -> str:
         ...
+
+
+class PredictionMergeError(RuntimeError):
+    """Prediction worker results cannot be merged into a complete ordered output."""
+
+
+class PredictionBatchError(RuntimeError):
+    """A generator returned a different number of predictions than requested."""
 
 
 @dataclass
@@ -106,11 +114,12 @@ def _row_prompt(
     dataset_key: str,
     row: Mapping[str, Any],
     prompt_files: Mapping[str, Path],
+    prompt_texts: Mapping[str, str] | None = None,
 ) -> str | list[dict[str, Any]]:
     """Single-turn rows render to a prompt string; rows with history become chat turns
     (gold answers replayed as assistant messages), with the prompt template applied to
     the current question only."""
-    rendered = render_infer_prompt(dataset_key, row, prompt_files)
+    rendered = render_infer_prompt(dataset_key, row, prompt_files, prompt_texts=prompt_texts)
     history = parse_history_cell(row.get("history"))
     if not history:
         return rendered
@@ -122,11 +131,23 @@ def _row_prompt(
     return turns
 
 
-def render_infer_prompt(dataset_key: str, row: Mapping[str, Any], prompt_files: Mapping[str, Path]) -> str:
+def resolve_infer_prompt_text(dataset_key: str, prompt_files: Mapping[str, Path]) -> str:
     if dataset_key in prompt_files:
-        template_text = load_prompt_text(prompt_files[dataset_key])
-    else:
-        template_text = DEFAULT_INFER_PROMPTS.get(dataset_key, DEFAULT_INFER_PROMPTS["vqa"])
+        return load_prompt_text(prompt_files[dataset_key])
+    return DEFAULT_INFER_PROMPTS.get(dataset_key, DEFAULT_INFER_PROMPTS["vqa"])
+
+
+def render_infer_prompt(
+    dataset_key: str,
+    row: Mapping[str, Any],
+    prompt_files: Mapping[str, Path],
+    prompt_texts: Mapping[str, str] | None = None,
+) -> str:
+    template_text = (
+        prompt_texts[dataset_key]
+        if prompt_texts is not None and dataset_key in prompt_texts
+        else resolve_infer_prompt_text(dataset_key, prompt_files)
+    )
     return PromptTemplate(template_text).render(row)
 
 
@@ -161,8 +182,12 @@ def generate_predictions(
     batch_size: int = 1,
     progress: bool = False,
     progress_desc: str = "Infer",
+    prompt_texts: Mapping[str, str] | None = None,
+    on_batch: Callable[[list[Mapping[str, Any]], list[str]], None] | None = None,
 ) -> list[str]:
     predictions: list[str] = []
+    prompt_snapshot = dict(prompt_texts or {})
+    prompt_snapshot.setdefault(dataset_key, resolve_infer_prompt_text(dataset_key, prompt_files))
     batch_size = max(1, int(batch_size))
     starts = list(range(0, len(rows), batch_size))
     # Plain periodic prints instead of tqdm: tqdm floods redirected/nohup logs
@@ -170,12 +195,19 @@ def generate_predictions(
     log_every = max(1, len(starts) // 100)
     for batch_no, start in enumerate(starts):
         batch = rows[start : start + batch_size]
-        prompts = [_row_prompt(dataset_key, row, prompt_files) for row in batch]
+        prompts = [_row_prompt(dataset_key, row, prompt_files, prompt_texts=prompt_snapshot) for row in batch]
         images = [_image_cell_or_none(row.get("image")) for row in batch]
         if hasattr(generator, "generate_batch"):
-            predictions.extend(generator.generate_batch(prompts, images))  # type: ignore[attr-defined]
+            batch_predictions = list(generator.generate_batch(prompts, images))  # type: ignore[attr-defined]
         else:
-            predictions.extend(generator.generate(prompt, image) for prompt, image in zip(prompts, images))
+            batch_predictions = [generator.generate(prompt, image) for prompt, image in zip(prompts, images)]
+        if len(batch_predictions) != len(batch):
+            raise PredictionBatchError(
+                f"returned {len(batch_predictions)} predictions for {len(batch)} rows"
+            )
+        if on_batch is not None:
+            on_batch(batch, batch_predictions)
+        predictions.extend(batch_predictions)
         if progress and (batch_no % log_every == 0 or batch_no == len(starts) - 1):
             print(f"[{progress_desc}] {len(predictions)}/{len(rows)}", flush=True)
     return predictions
@@ -190,11 +222,19 @@ def chunk_records(rows: list[Mapping[str, Any]], worker_count: int) -> list[list
 
 
 def merge_indexed_predictions(chunks: Iterable[Iterable[tuple[int, str]]], total: int) -> list[str]:
-    merged = [""] * total
+    merged: list[str | None] = [None] * total
     for chunk in chunks:
         for idx, prediction in chunk:
+            if type(idx) is not int or idx < 0 or idx >= total:
+                raise PredictionMergeError(f"invalid position: {idx}")
+            if merged[idx] is not None:
+                raise PredictionMergeError(f"duplicate position: {idx}")
             merged[idx] = prediction
-    return merged
+    missing = [idx for idx, prediction in enumerate(merged) if prediction is None]
+    if missing:
+        sample = ",".join(str(idx) for idx in missing[:20])
+        raise PredictionMergeError(f"missing positions: {sample}")
+    return [prediction for prediction in merged if prediction is not None]
 
 
 def count_missing_images(rows: list[Mapping[str, Any]]) -> tuple[int, list[str]]:

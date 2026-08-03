@@ -2,6 +2,7 @@ import pandas as pd
 import pytest
 
 from eval_tool.config import InferConfig
+from eval_tool.infer import generate_predictions
 from eval_tool.run_infer import run
 
 
@@ -22,6 +23,75 @@ class FakeBatchGenerator:
         image_b64s = image_b64s or [None] * len(prompts)
         self.batch_calls.append((list(prompts), list(image_b64s)))
         return [f"pred-{i}" for i, _ in enumerate(prompts)]
+
+
+class ShortBatchGenerator:
+    def generate_batch(self, prompts, image_b64s=None):
+        return ["only-one"]
+
+
+class MutatingPromptGenerator:
+    def __init__(self, prompt_path):
+        self.prompt_path = prompt_path
+        self.prompts = []
+
+    def generate(self, prompt, image_b64=None):
+        self.prompts.append(prompt)
+        if len(self.prompts) == 1:
+            self.prompt_path.write_text("changed {question}", encoding="utf-8")
+        return "answer"
+
+
+def test_generate_predictions_rejects_short_batch():
+    rows = [
+        {"index": "1", "question": "q1"},
+        {"index": "2", "question": "q2"},
+    ]
+
+    with pytest.raises(RuntimeError, match="returned 1 predictions for 2 rows"):
+        generate_predictions(rows, "vqa", {}, ShortBatchGenerator(), batch_size=2)
+
+
+def test_generate_predictions_snapshots_prompt_before_first_batch(tmp_path):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("original {question}", encoding="utf-8")
+    generator = MutatingPromptGenerator(prompt_path)
+
+    generate_predictions(
+        [{"index": "1", "question": "q1"}, {"index": "2", "question": "q2"}],
+        "vqa",
+        {"vqa": prompt_path},
+        generator,
+        batch_size=1,
+    )
+
+    assert generator.prompts == ["original q1", "original q2"]
+
+
+def test_generate_predictions_reports_each_completed_batch():
+    completed = []
+    rows = [
+        {"index": "1", "question": "q1"},
+        {"index": "2", "question": "q2"},
+        {"index": "3", "question": "q3"},
+    ]
+
+    predictions = generate_predictions(
+        rows,
+        "vqa",
+        {},
+        FakeBatchGenerator(),
+        batch_size=2,
+        on_batch=lambda batch_rows, batch_predictions: completed.append(
+            ([row["index"] for row in batch_rows], list(batch_predictions))
+        ),
+    )
+
+    assert predictions == ["pred-0", "pred-1", "pred-0"]
+    assert completed == [
+        (["1", "2"], ["pred-0", "pred-1"]),
+        (["3"], ["pred-0"]),
+    ]
 
 
 def test_run_infer_generates_reusable_xlsx_without_image_column(tmp_path):
