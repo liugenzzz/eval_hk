@@ -32,6 +32,10 @@ from .infer_cache import (
 from .io import load_truth_dataset
 
 
+class InferenceWorkerError(RuntimeError):
+    pass
+
+
 def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, Path]:
     config.out_dir.mkdir(parents=True, exist_ok=True)
     use_parallel = generator is None and bool(config.gpu_ids)
@@ -52,7 +56,7 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
     written: dict[str, Path] = {}
     for dataset_key, dataset_name in config.datasets.items():
         out_path = prediction_output_path(config.out_dir, config.model_name, dataset_name)
-        if out_path.exists() and not overwrite and not (config.resume and not use_parallel):
+        if out_path.exists() and not overwrite and not config.resume:
             written[dataset_key] = out_path
             continue
         print(f"[infer] 读取数据集 {dataset_name} ...", flush=True)
@@ -73,8 +77,8 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
                 flush=True,
             )
         print(f"[infer] {dataset_name}: 共 {len(rows)} 条，开始推理", flush=True)
-        if config.resume and not use_parallel:
-            _run_dataset_resumable_sequential(
+        if config.resume:
+            _run_dataset_resumable(
                 config,
                 dataset_key,
                 dataset_name,
@@ -82,6 +86,7 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
                 rows,
                 out_path,
                 get_local_generator,
+                use_parallel=use_parallel,
             )
         elif use_parallel:
             predictions = _run_dataset_parallel(config, dataset_key, rows)
@@ -95,14 +100,14 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
                 progress=True,
                 progress_desc=f"Infer {dataset_name}",
             )
-        if not (config.resume and not use_parallel):
+        if not config.resume:
             output = build_prediction_frame(data, predictions)
             output.to_excel(out_path, index=False)
         written[dataset_key] = out_path
     return written
 
 
-def _run_dataset_resumable_sequential(
+def _run_dataset_resumable(
     config: InferConfig,
     dataset_key: str,
     dataset_name: str,
@@ -110,11 +115,13 @@ def _run_dataset_resumable_sequential(
     rows: list[Mapping[str, Any]],
     out_path: Path,
     generator_factory: Callable[[], VLGenerator | None],
+    *,
+    use_parallel: bool,
 ) -> None:
     lock_path = config.out_dir / "_partial" / f"{dataset_key}.lock"
     try:
         with InferenceLock(lock_path):
-            _run_dataset_resumable_sequential_unlocked(
+            _run_dataset_resumable_unlocked(
                 config,
                 dataset_key,
                 dataset_name,
@@ -122,13 +129,14 @@ def _run_dataset_resumable_sequential(
                 rows,
                 out_path,
                 generator_factory,
+                use_parallel=use_parallel,
             )
     except Exception as exc:
         _append_infer_warning(config.out_dir, dataset_key, dataset_name, exc)
         raise
 
 
-def _run_dataset_resumable_sequential_unlocked(
+def _run_dataset_resumable_unlocked(
     config: InferConfig,
     dataset_key: str,
     dataset_name: str,
@@ -136,6 +144,8 @@ def _run_dataset_resumable_sequential_unlocked(
     rows: list[Mapping[str, Any]],
     out_path: Path,
     generator_factory: Callable[[], VLGenerator | None],
+    *,
+    use_parallel: bool,
 ) -> None:
     indexes = _validated_indexes(rows)
     prompt_text = resolve_infer_prompt_text(dataset_key, config.prompt_files)
@@ -194,23 +204,32 @@ def _run_dataset_resumable_sequential_unlocked(
     _validate_cached_indexes(cached, indexes, require_complete=False)
     pending_rows = [row for row in rows if str(row["index"]) not in cached]
     if pending_rows:
-        generator = generator_factory()
-        if generator is None:
-            raise RuntimeError("sequential inference requires a generator")
-        generate_predictions(
-            pending_rows,
-            dataset_key,
-            config.prompt_files,
-            generator,
-            batch_size=config.batch_size,
-            progress=True,
-            progress_desc=f"Infer {dataset_name}",
-            prompt_texts={dataset_key: prompt_text},
-            on_batch=lambda batch_rows, batch_predictions: store.append_batch(
-                (str(row["index"]), prediction)
-                for row, prediction in zip(batch_rows, batch_predictions)
-            ),
-        )
+        if use_parallel:
+            _run_dataset_parallel_resumable(
+                config,
+                dataset_key,
+                pending_rows,
+                prompt_text,
+                store,
+            )
+        else:
+            generator = generator_factory()
+            if generator is None:
+                raise RuntimeError("sequential inference requires a generator")
+            generate_predictions(
+                pending_rows,
+                dataset_key,
+                config.prompt_files,
+                generator,
+                batch_size=config.batch_size,
+                progress=True,
+                progress_desc=f"Infer {dataset_name}",
+                prompt_texts={dataset_key: prompt_text},
+                on_batch=lambda batch_rows, batch_predictions: store.append_batch(
+                    (str(row["index"]), prediction)
+                    for row, prediction in zip(batch_rows, batch_predictions)
+                ),
+            )
     completed = store.load()
     _validate_cached_indexes(completed, indexes, require_complete=True)
     predictions = [completed[index] for index in indexes]
@@ -307,6 +326,98 @@ def _append_infer_warning(
             f"[infer] {dataset_key}/{dataset_name}: "
             f"{type(warning).__name__}: {warning}\n"
         )
+
+
+def _run_dataset_parallel_resumable(
+    config: InferConfig,
+    dataset_key: str,
+    rows: list[Mapping[str, Any]],
+    prompt_text: str,
+    store: InferShardStore,
+) -> None:
+    worker_gpus = [
+        gpu for gpu in config.gpu_ids for _ in range(config.workers_per_gpu)
+    ]
+    chunks = chunk_records(rows, len(worker_gpus))
+    errors: list[tuple[int, Exception]] = []
+    with ProcessPoolExecutor(max_workers=len(worker_gpus)) as executor:
+        futures = {
+            executor.submit(
+                _infer_worker_resumable,
+                worker_id,
+                gpu_id,
+                chunk,
+                dataset_key,
+                prompt_text,
+                str(config.model_path),
+                config.max_new_tokens,
+                config.batch_size,
+                config.torch_dtype,
+                str(store.partial_dir),
+                store.fingerprint,
+            ): worker_id
+            for worker_id, (gpu_id, chunk) in enumerate(zip(worker_gpus, chunks))
+            if chunk
+        }
+        iterator = as_completed(futures)
+        iterator = _progress(
+            iterator,
+            total=len(futures),
+            desc=f"Infer {dataset_key} workers",
+        )
+        for future in iterator:
+            worker_id = futures[future]
+            try:
+                future.result()
+            except Exception as exc:
+                errors.append((worker_id, exc))
+    if errors:
+        summary = "; ".join(
+            f"worker {worker_id}: {error}" for worker_id, error in errors
+        )
+        raise InferenceWorkerError(summary)
+
+
+def _infer_worker_resumable(
+    worker_id: int,
+    gpu_id: int,
+    indexed_rows: list[tuple[int, Mapping[str, Any]]],
+    dataset_key: str,
+    prompt_text: str,
+    model_path: str,
+    max_new_tokens: int,
+    batch_size: int,
+    torch_dtype: str,
+    partial_dir: str,
+    fingerprint: str,
+) -> int:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    generator = QwenVLGenerator(
+        model_path=Path(model_path),
+        max_new_tokens=max_new_tokens,
+        torch_dtype=torch_dtype,
+        device_map="auto",
+    )
+    rows = [row for _, row in indexed_rows]
+    store = InferShardStore(partial_dir, dataset_key, fingerprint)
+    generate_predictions(
+        rows,
+        dataset_key,
+        {},
+        generator,
+        batch_size=batch_size,
+        progress=True,
+        progress_desc=f"Infer {dataset_key} gpu{gpu_id}-w{worker_id}",
+        prompt_texts={dataset_key: prompt_text},
+        on_batch=lambda batch_rows, batch_predictions: store.append_batch(
+            (
+                (str(row["index"]), prediction)
+                for row, prediction in zip(batch_rows, batch_predictions)
+            ),
+            worker_id=worker_id,
+        ),
+    )
+    return len(rows)
 
 
 def _run_dataset_parallel(config: InferConfig, dataset_key: str, rows: list[Mapping[str, Any]]) -> list[str]:

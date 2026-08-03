@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -28,6 +29,35 @@ class RecordingBatchGenerator:
     def generate_batch(self, prompts, image_b64s=None):
         self.prompts.extend(prompts)
         return [f"prediction:{prompt}" for prompt in prompts]
+
+
+class ImmediateFuture:
+    def __init__(self, function, args):
+        try:
+            self.value = function(*args)
+            self.error = None
+        except Exception as exc:
+            self.value = None
+            self.error = exc
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+class ImmediateExecutor:
+    def __init__(self, max_workers):
+        self.max_workers = max_workers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return None
+
+    def submit(self, function, *args):
+        return ImmediateFuture(function, args)
 
 
 def _write_vqa_dataset(tmp_path, count=3):
@@ -333,3 +363,65 @@ def test_manifest_metadata_mismatch_requires_overwrite_before_generation(tmp_pat
         run(config, generator=generator)
 
     assert generator.prompts == []
+
+
+def test_parallel_failure_keeps_completed_worker_shard_without_final(tmp_path, monkeypatch):
+    config = replace(_resume_config(tmp_path), gpu_ids=[0, 1])
+
+    class PerGpuGenerator:
+        def __init__(self, gpu_id):
+            self.gpu_id = gpu_id
+
+        def generate_batch(self, prompts, image_b64s=None):
+            if self.gpu_id == "1":
+                raise RuntimeError("gpu worker failed")
+            return [f"gpu{self.gpu_id}:{prompt}" for prompt in prompts]
+
+    def construct_generator(**kwargs):
+        return PerGpuGenerator(os.environ["CUDA_VISIBLE_DEVICES"])
+
+    monkeypatch.setattr("eval_tool.run_infer.QwenVLGenerator", construct_generator)
+    monkeypatch.setattr("eval_tool.run_infer.ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr("eval_tool.run_infer.as_completed", lambda futures: futures)
+    monkeypatch.setattr("eval_tool.run_infer._progress", lambda iterable, **kwargs: iterable)
+
+    with pytest.raises(RuntimeError, match="gpu worker failed"):
+        run(config)
+
+    shards = list((config.out_dir / "_partial").glob("vqa__*.jsonl"))
+    assert shards
+    records = [
+        json.loads(line)
+        for shard in shards
+        for line in shard.read_text(encoding="utf-8").splitlines()
+    ]
+    assert {record["index"] for record in records} == {"0", "2"}
+    output_path = config.out_dir / "base_aero_vqa.xlsx"
+    assert not output_path.exists()
+
+    written = run(replace(config, gpu_ids=[0]))
+
+    output = pd.read_excel(written["vqa"], dtype={"index": str})
+    assert output["index"].tolist() == ["0", "1", "2"]
+    assert output["prediction"].notna().all()
+
+
+def test_parallel_short_batch_is_rejected_before_shard_or_final(tmp_path, monkeypatch):
+    config = replace(_resume_config(tmp_path), gpu_ids=[0], batch_size=3)
+
+    class ShortGenerator:
+        def generate_batch(self, prompts, image_b64s=None):
+            return ["only one"]
+
+    monkeypatch.setattr(
+        "eval_tool.run_infer.QwenVLGenerator", lambda **kwargs: ShortGenerator()
+    )
+    monkeypatch.setattr("eval_tool.run_infer.ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr("eval_tool.run_infer.as_completed", lambda futures: futures)
+    monkeypatch.setattr("eval_tool.run_infer._progress", lambda iterable, **kwargs: iterable)
+
+    with pytest.raises(RuntimeError, match="returned 1 predictions for 3 rows"):
+        run(config)
+
+    assert list((config.out_dir / "_partial").glob("vqa__*.jsonl")) == []
+    assert not (config.out_dir / "base_aero_vqa.xlsx").exists()
