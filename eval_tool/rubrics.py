@@ -29,6 +29,17 @@ def rubric_prompt_path(version: str) -> Path:
     return path
 
 
+def validate_rubric_list(versions: list[str] | tuple[str, ...]) -> list[str]:
+    normalized = [str(version).strip() for version in versions]
+    if not normalized or any(not version for version in normalized):
+        raise RubricError("at least one rubric is required")
+    if len(set(normalized)) != len(normalized):
+        raise RubricError("duplicate rubrics are not allowed")
+    for version in normalized:
+        rubric_prompt_path(version)
+    return normalized
+
+
 def apply_rubric(
     config: EvalConfig,
     version: str,
