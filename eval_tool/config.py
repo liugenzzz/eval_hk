@@ -127,6 +127,107 @@ class PipelineConfig:
     def artifacts(self) -> ArtifactLayout:
         return ArtifactLayout(self.work_dir, self.out_dir)
 
+    def select_models(
+        self, names: list[str] | tuple[str, ...] | None = None
+    ) -> list[PipelineModelConfig]:
+        by_name = {model.name: model for model in self.models}
+        requested = list(by_name) if names is None else [str(name) for name in names]
+        unknown = [name for name in requested if name not in by_name]
+        if unknown:
+            raise ConfigError(f"unknown models: {','.join(unknown)}")
+        if len(set(requested)) != len(requested):
+            raise ConfigError("duplicate names in --models")
+        return [by_name[name] for name in requested]
+
+    def to_infer_configs(
+        self,
+        names: list[str] | tuple[str, ...] | None = None,
+        *,
+        overwrite: bool = False,
+        clean_partial: bool = False,
+    ) -> list[InferConfig]:
+        configs: list[InferConfig] = []
+        for model in self.select_models(names):
+            pending_datasets = {
+                key: self.datasets[key]
+                for key in self.enabled_datasets
+                if key not in model.scored_paths and key not in model.pred_paths
+            }
+            if not pending_datasets:
+                continue
+            if model.model_path is None:
+                raise ConfigError(
+                    f"model_path is required for inference model: {model.name}"
+                )
+            configs.append(
+                InferConfig(
+                    model_name=model.name,
+                    model_path=model.model_path,
+                    tsv_dir=self.tsv_dir,
+                    out_dir=self.artifacts.model_dir(model.name),
+                    datasets=pending_datasets,
+                    prompt_files=dict(self.infer.prompt_files),
+                    max_new_tokens=self.infer.max_new_tokens,
+                    batch_size=self.infer.batch_size,
+                    limit=self.infer.limit,
+                    overwrite=overwrite,
+                    torch_dtype=self.infer.torch_dtype,
+                    device_map=self.infer.device_map,
+                    gpu_ids=list(self.infer.gpu_ids),
+                    workers_per_gpu=self.infer.workers_per_gpu,
+                    resume=True,
+                    clean_partial=clean_partial,
+                )
+            )
+        return configs
+
+    def to_eval_config(
+        self, names: list[str] | tuple[str, ...] | None = None
+    ) -> EvalConfig:
+        selected = self.select_models(names)
+        models: list[ModelConfig] = []
+        for model in selected:
+            paths: dict[str, str] = {}
+            scored_paths: dict[str, str] = {}
+            for dataset_key in self.enabled_datasets:
+                if dataset_key in model.scored_paths:
+                    scored_paths[dataset_key] = str(model.scored_paths[dataset_key])
+                elif dataset_key in model.pred_paths:
+                    paths[dataset_key] = str(model.pred_paths[dataset_key])
+                else:
+                    paths[dataset_key] = str(
+                        self.artifacts.prediction(
+                            model.name, self.datasets[dataset_key]
+                        )
+                    )
+            models.append(
+                ModelConfig(
+                    name=model.name,
+                    paths=paths,
+                    scored_paths=scored_paths,
+                )
+            )
+        selected_names = {model.name for model in selected}
+        return EvalConfig(
+            tsv_dir=self.tsv_dir,
+            out_dir=self.out_dir,
+            cache_dir=self.cache_dir,
+            datasets=dict(self.datasets),
+            models=models,
+            baseline_model=self.baseline_model,
+            judge=self.judge,
+            max_workers=self.max_workers,
+            do_pointwise=self.do_pointwise,
+            do_pairwise=self.do_pairwise
+            and self.baseline_model in selected_names,
+            do_length_control=self.do_length_control,
+            mcq_llm_extract_fallback=self.mcq_llm_extract_fallback,
+            bootstrap_n=self.bootstrap_n,
+            seed=self.seed,
+            enabled_datasets=list(self.enabled_datasets),
+            category_weights=dict(self.category_weights),
+        )
+
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
 

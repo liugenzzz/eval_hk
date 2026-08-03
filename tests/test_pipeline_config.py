@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -131,3 +132,94 @@ def test_non_pipeline_legacy_config_is_not_misdetected(tmp_path):
     )
 
     assert is_pipeline_config(path) is False
+
+
+def _adaptation_config(tmp_path):
+    return load_pipeline_config(
+        _write_pipeline(
+            tmp_path,
+            datasets={
+                "mcq": "aero_mcq",
+                "judge": "aero_judge",
+                "vqa": "aero_vqa",
+            },
+            models=[
+                {
+                    "name": "base",
+                    "model_path": "models/base",
+                    "pred": {"mcq": "external/base_mcq.csv"},
+                    "scored": {"vqa": "scored/detail_base_vqa.xlsx"},
+                },
+                {"name": "sft", "model_path": "models/sft"},
+            ],
+        )
+    )
+
+
+def test_eval_derivation_uses_scored_then_pred_then_convention(tmp_path):
+    config = _adaptation_config(tmp_path)
+
+    derived = config.to_eval_config(["base", "sft"])
+    base, sft = derived.models
+
+    assert Path(base.scored_path_for("vqa")) == (
+        tmp_path / "scored" / "detail_base_vqa.xlsx"
+    )
+    assert Path(base.path_for("mcq")) == tmp_path / "external" / "base_mcq.csv"
+    assert base.path_for("vqa") is None
+    assert Path(sft.path_for("vqa")) == (
+        tmp_path / "work" / "sft" / "sft_aero_vqa.xlsx"
+    )
+
+
+def test_infer_derivation_skips_external_sources_and_enables_resume(tmp_path):
+    config = _adaptation_config(tmp_path)
+
+    configs = config.to_infer_configs(["base"])
+
+    assert len(configs) == 1
+    assert configs[0].datasets == {"judge": "aero_judge"}
+    assert configs[0].resume is True
+    assert configs[0].overwrite is False
+    assert configs[0].clean_partial is False
+    assert configs[0].out_dir == tmp_path / "work" / "base"
+
+
+def test_infer_derivation_skips_model_when_all_datasets_are_external(tmp_path):
+    config = load_pipeline_config(
+        _write_pipeline(
+            tmp_path,
+            models=[
+                {
+                    "name": "base",
+                    "pred": {"mcq": "mcq.xlsx", "vqa": "vqa.xlsx"},
+                }
+            ],
+        )
+    )
+
+    assert config.to_infer_configs() == []
+
+
+def test_filter_without_baseline_disables_pairwise(tmp_path):
+    config = _adaptation_config(tmp_path)
+
+    without_baseline = config.to_eval_config(["sft"])
+    with_baseline = config.to_eval_config(["base", "sft"])
+
+    assert without_baseline.do_pairwise is False
+    assert without_baseline.do_pointwise is True
+    assert with_baseline.do_pairwise is True
+
+
+def test_model_filter_preserves_requested_order_and_rejects_bad_names(tmp_path):
+    config = _adaptation_config(tmp_path)
+
+    assert [model.name for model in config.select_models(["sft", "base"])] == [
+        "sft",
+        "base",
+    ]
+    with pytest.raises(ConfigError, match="unknown models: missing"):
+        config.select_models(["missing"])
+    with pytest.raises(ConfigError, match="duplicate names in --models"):
+        config.select_models(["base", "base"])
