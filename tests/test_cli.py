@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import run_rubric
 from eval_tool.cli import main
 
 
@@ -134,3 +135,99 @@ def test_unknown_pipeline_model_is_rendered_as_parser_error(tmp_path, capsys):
         main(["infer", "--config", str(config_path), "--models", "missing"])
 
     assert "unknown models: missing" in capsys.readouterr().err
+
+
+def test_sweep_cli_parses_rubrics_models_and_statistics_options(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "eval_tool.cli.HANDLERS", {"sweep": lambda args: captured.append(args)}
+    )
+
+    main(
+        [
+            "sweep",
+            "--config",
+            "pipeline.json",
+            "--rubrics",
+            "v3,v4",
+            "--models",
+            "base,sft",
+            "--out-root",
+            "custom",
+            "--no-pairwise",
+            "--metric",
+            "quality_score",
+            "--n-bootstrap",
+            "50",
+        ]
+    )
+
+    assert captured[0].rubrics == ["v3", "v4"]
+    assert captured[0].models == ["base", "sft"]
+    assert captured[0].out_root == "custom"
+    assert captured[0].no_pairwise is True
+    assert captured[0].metric == "quality_score"
+    assert captured[0].n_bootstrap == 50
+
+
+def test_eval_rubric_dry_run_derives_without_running(tmp_path, monkeypatch, capsys):
+    config_path = tmp_path / "pipeline.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "tsv_dir": "tsv",
+                "datasets": {"vqa": "aero_vqa"},
+                "work_dir": "work",
+                "out_dir": "reports/eval_report",
+                "cache_dir": "cache",
+                "models": [{"name": "base", "model_path": "model"}],
+                "baseline_model": "base",
+                "infer": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "eval_tool.cli.run_eval_stage",
+        lambda config: pytest.fail("dry-run must not evaluate"),
+    )
+
+    derived = main(
+        [
+            "eval",
+            "--config",
+            str(config_path),
+            "--rubric",
+            "v4",
+            "--out-root",
+            str(tmp_path / "custom"),
+            "--no-pairwise",
+            "--dry-run",
+        ]
+    )
+
+    assert derived.out_dir == tmp_path / "custom" / "eval_report_v4"
+    assert derived.do_pairwise is False
+    output = capsys.readouterr().out
+    assert "fingerprint" in output
+    assert "v4" in output
+
+
+def test_run_rubric_shim_calls_new_cli(monkeypatch):
+    calls = []
+    monkeypatch.setattr("run_rubric.cli_main", lambda argv: calls.append(argv))
+
+    run_rubric.main(
+        ["--config", "old.json", "--rubric", "v4", "--no-pairwise"]
+    )
+
+    assert calls == [
+        [
+            "eval",
+            "--config",
+            "old.json",
+            "--rubric",
+            "v4",
+            "--no-pairwise",
+        ]
+    ]

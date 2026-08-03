@@ -21,7 +21,9 @@ from .pipeline import (
     run_conversion,
     run_evaluation,
     run_inference,
+    run_sweep,
 )
+from .rubrics import RubricError, apply_rubric
 from .run_eval import run as run_eval_stage
 from .run_infer import run as run_infer_stage
 
@@ -34,6 +36,15 @@ def _model_names(value: str) -> list[str]:
     if not names or any(not name for name in names):
         raise argparse.ArgumentTypeError("--models requires comma-separated names")
     return names
+
+
+def _rubric_names(value: str) -> list[str]:
+    versions = [item.strip() for item in str(value).split(",")]
+    if not versions or any(not version for version in versions):
+        raise argparse.ArgumentTypeError(
+            "--rubrics requires comma-separated versions"
+        )
+    return versions
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,11 +65,18 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--config", required=True)
     evaluate.add_argument("--models", type=_model_names)
     evaluate.add_argument("--rubric")
+    evaluate.add_argument("--out-root")
+    evaluate.add_argument("--no-pairwise", action="store_true")
+    evaluate.add_argument("--dry-run", action="store_true")
 
     sweep = subparsers.add_parser("sweep", help="Evaluate several rubrics")
     sweep.add_argument("--config", required=True)
     sweep.add_argument("--models", type=_model_names)
-    sweep.add_argument("--rubrics", required=True)
+    sweep.add_argument("--rubrics", required=True, type=_rubric_names)
+    sweep.add_argument("--out-root")
+    sweep.add_argument("--no-pairwise", action="store_true")
+    sweep.add_argument("--metric")
+    sweep.add_argument("--n-bootstrap", type=int, default=5000)
 
     all_command = subparsers.add_parser("all", help="Run convert, infer, and eval")
     all_command.add_argument("--config", required=True)
@@ -127,17 +145,47 @@ def _filter_legacy_eval(config: EvalConfig, names: list[str] | None) -> EvalConf
 
 def _handle_eval(args: argparse.Namespace) -> Any:
     if is_pipeline_config(args.config):
-        if args.rubric:
-            raise PipelineError("--rubric support is added by the rubric stage")
-        return run_evaluation(load_pipeline_config(args.config), args.models)
-    if args.rubric:
-        raise ConfigError("--rubric requires a unified pipeline config")
-    config = _filter_legacy_eval(load_config(args.config), args.models)
-    return run_eval_stage(config)
+        pipeline_config = load_pipeline_config(args.config)
+        if not args.rubric:
+            if args.out_root or args.no_pairwise or args.dry_run:
+                raise ConfigError(
+                    "--out-root, --no-pairwise, and --dry-run require --rubric"
+                )
+            return run_evaluation(pipeline_config, args.models)
+        config = pipeline_config.to_eval_config(args.models)
+    else:
+        config = _filter_legacy_eval(load_config(args.config), args.models)
+        if not args.rubric:
+            if args.out_root or args.no_pairwise or args.dry_run:
+                raise ConfigError(
+                    "--out-root, --no-pairwise, and --dry-run require --rubric"
+                )
+            return run_eval_stage(config)
+    derived = apply_rubric(
+        config,
+        args.rubric,
+        out_root=args.out_root,
+        no_pairwise=args.no_pairwise,
+    )
+    print(f"rubric      {args.rubric}")
+    print(f"out_dir     {derived.out_dir}")
+    print(f"do_pairwise {derived.do_pairwise}")
+    print(f"fingerprint {derived.judge.fingerprint}")
+    if args.dry_run:
+        return derived
+    return run_eval_stage(derived)
 
 
 def _handle_sweep(args: argparse.Namespace) -> Any:
-    raise PipelineError("sweep support is added by the rubric stage")
+    return run_sweep(
+        _require_pipeline(args.config),
+        args.rubrics,
+        model_names=args.models,
+        out_root=args.out_root,
+        no_pairwise=args.no_pairwise,
+        metric=args.metric,
+        n_bootstrap=args.n_bootstrap,
+    )
 
 
 def _handle_all(args: argparse.Namespace) -> Any:
@@ -168,5 +216,5 @@ def main(argv: list[str] | None = None) -> Any:
     args = parser.parse_args(arguments)
     try:
         return HANDLERS[args.command](args)
-    except (ConfigError, PipelineError) as exc:
+    except (ConfigError, PipelineError, RubricError) as exc:
         parser.error(str(exc))
