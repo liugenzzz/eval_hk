@@ -223,3 +223,15 @@ def test_model_filter_preserves_requested_order_and_rejects_bad_names(tmp_path):
         config.select_models(["missing"])
     with pytest.raises(ConfigError, match="duplicate names in --models"):
         config.select_models(["base", "base"])
+
+
+def test_pipeline_example_is_complete_and_parseable():
+    example_path = Path(__file__).parents[1] / "pipeline.example.json"
+
+    config = load_pipeline_config(example_path)
+
+    assert [model.name for model in config.models] == ["base", "sft_ep2"]
+    assert config.convert_input is not None
+    assert config.infer.max_new_tokens == 1024
+    assert config.judge.api_key == "sk-local"
+    assert config.to_infer_configs()[0].resume is True
