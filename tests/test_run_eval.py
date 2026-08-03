@@ -80,9 +80,19 @@ def test_run_eval_reuses_previously_scored_vqa_results_without_calling_judge(tmp
     out_dir = tmp_path / "out"
     cache_dir = tmp_path / "cache"
 
-    vqa_truth = pd.DataFrame(
-        [{"index": "1", "image": "img", "question": "描述这张图", "answer": "参考答案", "category": "单轮", "l2-category": "", "source_id": "s1"}]
-    )
+    rows = [
+        {
+            "index": str(index),
+            "image": "img",
+            "question": f"描述这张图 {index}",
+            "answer": "参考答案",
+            "category": "单轮",
+            "l2-category": "",
+            "source_id": f"s{index}",
+        }
+        for index in range(30)
+    ]
+    vqa_truth = pd.DataFrame(rows)
     vqa_truth.to_csv(tsv_dir / "aero_vqa.tsv", sep="\t", index=False)
 
     # Simulate a detail_base_vqa.xlsx produced by a previous run: already has hit/judge_reason.
@@ -90,9 +100,9 @@ def test_run_eval_reuses_previously_scored_vqa_results_without_calling_judge(tmp
     pd.DataFrame(
         [
             {
-                "index": "1",
-                "question": "描述这张图",
-                "answer": "参考答案",
+                "index": row["index"],
+                "question": row["question"],
+                "answer": row["answer"],
                 "prediction": "旧结果",
                 "category": "单轮",
                 "l2-category": "",
@@ -100,6 +110,7 @@ def test_run_eval_reuses_previously_scored_vqa_results_without_calling_judge(tmp
                 "judge_reason": "reused",
                 "pred_len": 3,
             }
+            for row in rows
         ]
     ).to_excel(scored_path, index=False)
 
