@@ -1,13 +1,13 @@
 # 统一推理/评估入口设计
 
 日期：2026-07-31  
-依据：`统一入口_需求文档.md`；用户已确认第五节 Q1–Q5 全部采用建议默认值。
+依据：`统一入口_需求文档.md`。初始开发指令要求第五节 Q1–Q5 按建议默认值实施；2026-08-03 复核要求不把这些选择表述为最终业务确认。当前实现以建议值作为保守默认，其中 Q2 明确采用 fail-safe：推理指纹变化时报错，只有显式 `--overwrite` 才允许全量重跑，绝不自动消耗数小时 GPU。
 
 ## 目标与范围
 
 在不改变评分口径的前提下，把数据转换、推理、评估、rubric 切换和多 rubric 对比统一到一份 pipeline 配置与一组子命令中。新入口支持多模型、推理断点续传和严格的预测完整性校验，同时保留现有命令与旧配置格式。
 
-本次包含 R1–R10。`judge.py`、`judge_rubrics.py`、`score_vqa.py`、`aggregate.py`、`report.py`、现有提示词及提示词生成脚本不做与统一入口无关的改动。现有“复用已评分结果”基线测试当前有一项 `total_score=NaN` 的失败；因它直接覆盖 `models[].scored` 兼容路径，本次将其纳入回归修复，但不改变计分定义。
+本次包含 R1–R10。`judge.py`、`judge_rubrics.py`、`score_vqa.py`、`aggregate.py`、`report.py`、现有提示词及提示词生成脚本不做与统一入口无关的改动。现有“复用已评分结果”测试只构造 1 行数据，却仍断言通过 2026-07-30 引入的 `MIN_CATEGORY_N = 30` 样本量门槛；这是过期测试 fixture，不是产品回归。实施时把 fixture 补到至少 30 行（或在聚合函数单测中显式传入更小的 `min_category_n`），绝不拆除或绕过统计门槛。
 
 ## 方案选择
 
@@ -23,7 +23,7 @@ pipeline 顶层共享 `tsv_dir`、`datasets`、`work_dir`、`out_dir`、`cache_d
 2. `pred.<dataset>`：复用外部预测并跳过推理；
 3. `work_dir/<model>/<model>_<dataset_name>.xlsx`：由统一推理入口生成。
 
-所有相对路径均相对于配置文件目录解析。模型过滤在派生配置前完成，并校验未知模型名、重复模型名及过滤后缺失 baseline 等错误。
+所有相对路径均相对于配置文件目录解析。模型过滤在派生配置前完成，并校验未知模型名和重复模型名。若过滤结果不含 baseline，点式评估照常执行，成对评估会被显式关闭并打印原因；不会隐式把 baseline 加回筛选结果。
 
 为补齐需求文档中 `all --config pipeline.json` 未说明转换输入来源的部分，配置允许可选的 `convert.input_json`。`all` 设置该值时先转换；未设置时要求目标 TSV 已存在后再继续。独立 `convert <sharegpt.json> --config pipeline.json` 始终以位置参数为准并写入同一 `tsv_dir`。
 
@@ -59,7 +59,7 @@ work_dir/<model>/_partial/<dataset>__<infer_fp>[__w<worker>].jsonl
 
 rubric 注册表把 `v1/v2/v3/v3b/v4/v4b` 映射到现有 pointwise 提示词。派生评估配置只替换 pointwise prompt 与带 rubric 后缀的输出目录，保留 judge fingerprint 输出和其余评估参数。
 
-`sweep` 严格串行调用裁判服务。各版本产出 `<out_dir>_<rubric>/judge_detail_all.xlsx` 后，调用从 `compare_rubrics.py` 抽出的纯函数，生成并打印比较 DataFrame，并把结果写到共同父目录中的 `rubric_comparison.csv`。任一 rubric 失败时停止后续比较，保留已完成报告与裁判缓存。
+`sweep` 严格串行调用裁判服务。因为 `scored` 文件没有可验证的 rubric 元数据，sweep 对所选模型发现任何 `scored` 覆写都会报错，避免把同一份旧裁判结果伪装成多组 rubric。各版本产出 `<out_dir>_<rubric>/judge_detail_all.xlsx` 后，调用从 `compare_rubrics.py` 抽出的纯函数，对每个非 baseline 模型分别生成并打印比较 DataFrame，并把结果写到共同父目录中的 `rubric_comparison.csv`。任一 rubric 失败时停止后续比较，保留已完成报告与裁判缓存。
 
 ## 错误处理与兼容性
 
