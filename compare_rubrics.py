@@ -40,19 +40,28 @@ def pick_metric(df: pd.DataFrame, requested: str | None) -> str:
     return "hit"
 
 
-def paired_stats(df: pd.DataFrame, baseline: str, metric: str,
-                 n_bootstrap: int = 5000, seed: int = 42) -> dict[str, object]:
+def paired_stats(
+    df: pd.DataFrame,
+    baseline: str,
+    metric: str,
+    target: str | None = None,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> dict[str, object]:
     wide = df.pivot_table(index="index", columns="model", values=metric, aggfunc="first")
     if baseline not in wide.columns:
         return {"error": f"baseline '{baseline}' not in {list(wide.columns)}"}
     others = [c for c in wide.columns if c != baseline]
     if not others:
         return {"error": "only the baseline model is present"}
-    target = others[0]
+    if target is None:
+        target = others[0]
+    if target not in others:
+        return {"error": f"model '{target}' is not a challenger"}
 
     pair = wide[[target, baseline]].dropna()
     if len(pair) < 10:
-        return {"error": f"only {len(pair)} paired rows"}
+        return {"model": target, "error": f"only {len(pair)} paired rows"}
 
     a = pair[target].to_numpy(dtype=float)
     b = pair[baseline].to_numpy(dtype=float)
@@ -77,6 +86,76 @@ def paired_stats(df: pd.DataFrame, baseline: str, metric: str,
         "better/equal/worse": f"{int((d>0).sum())}/{int((d==0).sum())}/{int((d<0).sum())}",
         "distinct_values": int(pd.unique(np.concatenate([a, b])).size),
     }
+
+
+def compare_runs(
+    runs: dict[str, pd.DataFrame],
+    baseline: str,
+    metric: str | None = None,
+    n_bootstrap: int = 5000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for label, df in runs.items():
+        selected_metric = pick_metric(df, metric)
+        if selected_metric not in df.columns:
+            rows.append(
+                {
+                    "rubric": label,
+                    "metric": selected_metric,
+                    "error": f"metric column not found: {selected_metric}",
+                }
+            )
+            continue
+        if "model" not in df.columns or "index" not in df.columns:
+            rows.append(
+                {
+                    "rubric": label,
+                    "metric": selected_metric,
+                    "error": "run needs 'index' and 'model' columns",
+                }
+            )
+            continue
+        models = list(dict.fromkeys(str(model) for model in df["model"].dropna()))
+        if baseline not in models:
+            rows.append(
+                {
+                    "rubric": label,
+                    "metric": selected_metric,
+                    "error": f"baseline '{baseline}' not in {models}",
+                }
+            )
+            continue
+        challengers = [model for model in models if model != baseline]
+        if not challengers:
+            rows.append(
+                {
+                    "rubric": label,
+                    "metric": selected_metric,
+                    "error": "only the baseline model is present",
+                }
+            )
+            continue
+        for challenger in challengers:
+            pair_frame = df[df["model"].isin([baseline, challenger])]
+            row: dict[str, object] = {
+                "rubric": label,
+                "metric": selected_metric,
+                "model": challenger,
+            }
+            row.update(
+                paired_stats(
+                    pair_frame,
+                    baseline,
+                    selected_metric,
+                    target=challenger,
+                    n_bootstrap=n_bootstrap,
+                    seed=seed,
+                )
+            )
+            row.update(human_agreement(pair_frame, selected_metric))
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def human_agreement(df: pd.DataFrame, metric: str) -> dict[str, object]:
@@ -127,65 +206,90 @@ def dz_pairwise_test(runs: dict[str, pd.DataFrame], baseline: str, metric: str |
     A CI that straddles 0 means the two rubrics are indistinguishable here and the choice
     has to be made on agreement with human labels instead.
     """
-    diffs: dict[str, pd.Series] = {}
-    for label, df in runs.items():
-        col = pick_metric(df, metric)
-        wide = df.pivot_table(index="index", columns="model", values=col, aggfunc="first")
-        if baseline not in wide.columns:
+    challengers: list[str] = []
+    for df in runs.values():
+        if "model" not in df.columns:
             continue
-        others = [c for c in wide.columns if c != baseline]
-        if not others:
+        for model in df["model"].dropna():
+            name = str(model)
+            if name != baseline and name not in challengers:
+                challengers.append(name)
+
+    rows: list[dict[str, object]] = []
+    for challenger in challengers:
+        diffs: dict[str, pd.Series] = {}
+        for label, df in runs.items():
+            col = pick_metric(df, metric)
+            if col not in df.columns:
+                continue
+            wide = df.pivot_table(
+                index="index", columns="model", values=col, aggfunc="first"
+            )
+            if baseline not in wide.columns or challenger not in wide.columns:
+                continue
+            pair = wide[[challenger, baseline]].dropna()
+            diffs[label] = pair[challenger] - pair[baseline]
+        if len(diffs) < 2:
             continue
-        pair = wide[[others[0], baseline]].dropna()
-        diffs[label] = (pair[others[0]] - pair[baseline])
 
-    if len(diffs) < 2:
-        return pd.DataFrame()
+        shared = None
+        for series in diffs.values():
+            shared = (
+                series.index
+                if shared is None
+                else shared.intersection(series.index)
+            )
+        shared = sorted(shared)
+        if len(shared) < 20:
+            rows.append(
+                {
+                    "model": challenger,
+                    "error": f"only {len(shared)} indices shared across runs",
+                }
+            )
+            continue
 
-    shared = None
-    for series in diffs.values():
-        shared = series.index if shared is None else shared.intersection(series.index)
-    shared = sorted(shared)
-    if len(shared) < 20:
-        return pd.DataFrame([{"error": f"only {len(shared)} indices shared across runs"}])
-
-    mat = {label: series.loc[shared].to_numpy(dtype=float) for label, series in diffs.items()}
-    labels = list(mat)
-
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(shared), size=(n_bootstrap, len(shared)))
-
-    boot_dz: dict[str, np.ndarray] = {}
-    point_dz: dict[str, float] = {}
-    for label, d in mat.items():
-        sd = d.std(ddof=1)
-        point_dz[label] = float(d.mean() / sd) if sd > 0 else float("nan")
-        sample = d[idx]
-        sd_b = sample.std(axis=1, ddof=1)
-        with np.errstate(divide="ignore", invalid="ignore"):
-            boot_dz[label] = np.where(sd_b > 0, sample.mean(axis=1) / sd_b, np.nan)
-
-    rows = []
-    for i, a in enumerate(labels):
-        for b in labels[i + 1:]:
-            delta = boot_dz[a] - boot_dz[b]
-            delta = delta[~np.isnan(delta)]
-            lo, hi = np.quantile(delta, [0.025, 0.975])
-            rows.append({
-                "pair": f"{a} - {b}",
-                f"dz_{a}": round(point_dz[a], 3),
-                f"dz_{b}": round(point_dz[b], 3),
-                "dz_diff": round(point_dz[a] - point_dz[b], 3),
-                "diff_ci": f"[{lo:+.3f}, {hi:+.3f}]",
-                "distinguishable": bool(lo > 0 or hi < 0),
-            })
-    out = pd.DataFrame(rows)
-    return pd.DataFrame([{
-        "pair": r["pair"],
-        "dz_diff": r["dz_diff"],
-        "diff_ci": r["diff_ci"],
-        "distinguishable": r["distinguishable"],
-    } for r in rows]) if not out.empty else out
+        matrix = {
+            label: series.loc[shared].to_numpy(dtype=float)
+            for label, series in diffs.items()
+        }
+        labels = list(matrix)
+        rng = np.random.default_rng(seed)
+        sample_indices = rng.integers(
+            0, len(shared), size=(n_bootstrap, len(shared))
+        )
+        boot_dz: dict[str, np.ndarray] = {}
+        point_dz: dict[str, float] = {}
+        for label, differences in matrix.items():
+            sd = differences.std(ddof=1)
+            point_dz[label] = (
+                float(differences.mean() / sd) if sd > 0 else float("nan")
+            )
+            sample = differences[sample_indices]
+            sample_sd = sample.std(axis=1, ddof=1)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                boot_dz[label] = np.where(
+                    sample_sd > 0,
+                    sample.mean(axis=1) / sample_sd,
+                    np.nan,
+                )
+        for position, first in enumerate(labels):
+            for second in labels[position + 1 :]:
+                delta = boot_dz[first] - boot_dz[second]
+                delta = delta[~np.isnan(delta)]
+                low, high = np.quantile(delta, [0.025, 0.975])
+                rows.append(
+                    {
+                        "model": challenger,
+                        "pair": f"{first} - {second}",
+                        "dz_diff": round(
+                            point_dz[first] - point_dz[second], 3
+                        ),
+                        "diff_ci": f"[{low:+.3f}, {high:+.3f}]",
+                        "distinguishable": bool(low > 0 or high < 0),
+                    }
+                )
+    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -199,7 +303,6 @@ def main() -> None:
     ap.add_argument("runs", nargs="+", metavar="LABEL=PATH")
     args = ap.parse_args()
 
-    rows = []
     runs: dict[str, pd.DataFrame] = {}
     for spec in args.runs:
         if "=" not in spec:
@@ -209,14 +312,12 @@ def main() -> None:
         if "index" not in df.columns or "model" not in df.columns:
             raise SystemExit(f"{path}: needs 'index' and 'model' columns")
         runs[label] = df
-        metric = pick_metric(df, args.metric)
-        row = {"rubric": label, "metric": metric}
-        row.update(paired_stats(df, args.baseline, metric,
-                                n_bootstrap=args.n_bootstrap))
-        row.update(human_agreement(df, metric))
-        rows.append(row)
-
-    out = pd.DataFrame(rows)
+    out = compare_runs(
+        runs,
+        args.baseline,
+        metric=args.metric,
+        n_bootstrap=args.n_bootstrap,
+    )
     with pd.option_context("display.width", 200, "display.max_columns", 50):
         print(out.to_string(index=False))
 
@@ -226,7 +327,11 @@ def main() -> None:
         if not test.empty:
             print("\npairwise effect-size test (resamples the shared index set):")
             print(test.to_string(index=False))
-            undecided = test[~test["distinguishable"]]["pair"].tolist()
+            undecided = (
+                test[~test["distinguishable"]]["pair"].tolist()
+                if "distinguishable" in test.columns
+                else []
+            )
             if undecided:
                 print(f"\nindistinguishable on this sample: {', '.join(undecided)}")
                 print("-> pick between these on agreement with human labels, not on d_z")
