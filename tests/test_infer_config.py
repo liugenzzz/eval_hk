@@ -33,3 +33,25 @@ def test_load_infer_config_reads_batch_and_gpu_parallel_options(tmp_path):
     assert config.resume is True
     assert config.clean_partial is True
     assert config.overwrite is None
+
+
+def test_load_infer_config_does_not_treat_false_strings_as_true(tmp_path):
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_name": "base",
+                "model_path": "model",
+                "overwrite": "false",
+                "resume": "false",
+                "clean_partial": "false",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_infer_config(config_path)
+
+    assert config.overwrite is False
+    assert config.resume is False
+    assert config.clean_partial is False

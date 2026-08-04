@@ -170,9 +170,11 @@ def _run_dataset_resumable_unlocked(
     manifest = read_manifest(manifest_path) if not overwrite else None
     attempt = read_manifest(attempt_path) if not overwrite else None
     authorized_attempt = attempt == expected_manifest
-    if out_path.exists() and manifest == expected_manifest:
-        if authorized_attempt:
-            attempt_path.unlink(missing_ok=True)
+    if (
+        out_path.exists()
+        and manifest == expected_manifest
+        and not authorized_attempt
+    ):
         if config.clean_partial:
             store.clean_dataset()
         return
@@ -191,17 +193,28 @@ def _run_dataset_resumable_unlocked(
                 f"inference manifest does not match current inputs for {dataset_key}; "
                 "rerun with --overwrite"
             )
+        if (
+            store.foreign_fingerprints()
+            and manifest != expected_manifest
+            and not authorized_attempt
+        ):
+            raise InferCacheError(
+                f"foreign inference shards found for {dataset_key}; rerun with --overwrite"
+            )
         if not cached:
             if out_path.exists() and manifest is None:
                 raise InferCacheError(
                     f"unverified legacy prediction file for {dataset_key}; "
                     "declare it as a pred input or rerun with --overwrite"
                 )
-            if store.foreign_fingerprints() and not authorized_attempt:
-                raise InferCacheError(
-                    f"foreign inference shards found for {dataset_key}; rerun with --overwrite"
-                )
     _validate_cached_indexes(cached, indexes, require_complete=False)
+    if manifest == expected_manifest and not out_path.exists():
+        missing = [index for index in indexes if index not in cached]
+        if missing:
+            raise InferCacheError(
+                f"completed inference manifest exists but the final prediction file "
+                f"and complete shards do not for {dataset_key}; rerun with --overwrite"
+            )
     pending_rows = [row for row in rows if str(row["index"]) not in cached]
     if pending_rows:
         if use_parallel:
@@ -239,9 +252,9 @@ def _run_dataset_resumable_unlocked(
         manifest_path,
         expected_manifest,
     )
+    attempt_path.unlink(missing_ok=True)
     if config.clean_partial:
         store.clean_dataset()
-    attempt_path.unlink(missing_ok=True)
 
 
 def _validated_indexes(rows: list[Mapping[str, Any]]) -> list[str]:

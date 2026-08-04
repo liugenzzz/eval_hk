@@ -178,6 +178,23 @@ def test_interrupted_explicit_overwrite_can_resume_without_clearing_new_shards(t
     assert resumed.prompts == ["prompt-b q1", "prompt-b q2"]
 
 
+def test_interrupted_same_fingerprint_overwrite_resumes_instead_of_reusing_old_final(
+    tmp_path,
+):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("prompt {question}", encoding="utf-8")
+    config = _resume_config(tmp_path, prompt_files={"vqa": prompt_path})
+    run(config, generator=RecordingBatchGenerator())
+
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run(replace(config, overwrite=True), generator=FailingSecondBatchGenerator())
+
+    resumed = RecordingBatchGenerator()
+    run(config, generator=resumed)
+
+    assert resumed.prompts == ["prompt q1", "prompt q2"]
+
+
 @pytest.mark.parametrize(
     ("indexes", "message"),
     [(["", "2"], "empty index"), (["1", "1"], "duplicate index")],
@@ -221,6 +238,37 @@ def test_matching_manifest_skips_without_partial_shards_or_model_load(tmp_path, 
 
     assert reused == written
     assert constructed == []
+
+
+def test_missing_final_with_incomplete_shards_requires_overwrite(tmp_path):
+    config = _resume_config(tmp_path, clean_partial=True)
+    output_path = run(config, generator=RecordingBatchGenerator())["vqa"]
+    output_path.unlink()
+    generator = RecordingBatchGenerator()
+
+    with pytest.raises(RuntimeError, match="--overwrite"):
+        run(config, generator=generator)
+
+    assert generator.prompts == []
+
+
+def test_current_shards_do_not_hide_foreign_fingerprint_attempt(tmp_path):
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text("prompt-a {question}", encoding="utf-8")
+    config = _resume_config(tmp_path, prompt_files={"vqa": prompt_path})
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run(config, generator=FailingSecondBatchGenerator())
+
+    prompt_path.write_text("prompt-b {question}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        run(replace(config, overwrite=True), generator=FailingSecondBatchGenerator())
+
+    prompt_path.write_text("prompt-a {question}", encoding="utf-8")
+    generator = RecordingBatchGenerator()
+    with pytest.raises(RuntimeError, match="--overwrite"):
+        run(config, generator=generator)
+
+    assert generator.prompts == []
 
 
 def test_xlsx_write_failure_preserves_previous_final(tmp_path, monkeypatch):

@@ -241,7 +241,11 @@ def is_pipeline_config(path: str | Path) -> bool:
         and isinstance(models_raw, list)
         and any(
             isinstance(model, dict)
-            and ("model_path" in model or "pred" in model)
+            and (
+                "model_path" in model
+                or "pred" in model
+                or "scored" in model
+            )
             for model in models_raw
         )
     )
@@ -449,12 +453,7 @@ def load_infer_config(path: str | Path) -> InferConfig:
     prompt_files = {str(k): _resolve_path(v, base_dir) for k, v in prompt_files_raw.items()}
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")
     gpu_ids = infer_raw.get("gpu_ids") or infer_raw.get("GPU_IDS") or []
-    if "overwrite" in infer_raw:
-        overwrite = bool(infer_raw["overwrite"])
-    elif "OVERWRITE" in infer_raw:
-        overwrite = bool(infer_raw["OVERWRITE"])
-    else:
-        overwrite = None
+    overwrite = _infer_bool(infer_raw, "overwrite", "OVERWRITE", None)
     return InferConfig(
         model_name=str(infer_raw.get("model_name") or infer_raw.get("MODEL_NAME")),
         model_path=_resolve_path(infer_raw.get("model_path") or infer_raw.get("MODEL_PATH"), base_dir),
@@ -470,11 +469,34 @@ def load_infer_config(path: str | Path) -> InferConfig:
         device_map=str(infer_raw.get("device_map") or infer_raw.get("DEVICE_MAP") or "auto"),
         gpu_ids=[int(x) for x in gpu_ids],
         workers_per_gpu=max(1, int(infer_raw.get("workers_per_gpu") or infer_raw.get("WORKERS_PER_GPU") or 1)),
-        resume=bool(infer_raw.get("resume", infer_raw.get("RESUME", False))),
-        clean_partial=bool(
-            infer_raw.get("clean_partial", infer_raw.get("CLEAN_PARTIAL", False))
+        resume=_infer_bool(infer_raw, "resume", "RESUME", False),
+        clean_partial=_infer_bool(
+            infer_raw, "clean_partial", "CLEAN_PARTIAL", False
         ),
     )
+
+
+def _infer_bool(
+    raw: dict[str, Any],
+    name: str,
+    legacy_name: str,
+    default: bool | None,
+) -> bool | None:
+    if name in raw:
+        value = raw[name]
+    elif legacy_name in raw:
+        value = raw[legacy_name]
+    else:
+        return default
+    if type(value) is bool:
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "false"}:
+            return normalized == "true"
+    if type(value) is int and value in {0, 1}:
+        return bool(value)
+    raise ConfigError(f"{name} must be a boolean")
 
 
 def _load_raw_config(path: Path) -> dict[str, Any]:

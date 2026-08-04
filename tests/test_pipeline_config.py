@@ -139,6 +139,23 @@ def test_non_pipeline_legacy_config_is_not_misdetected(tmp_path):
     assert is_pipeline_config(path) is False
 
 
+def test_scored_only_pipeline_is_detected(tmp_path):
+    path = _write_pipeline(
+        tmp_path,
+        models=[
+            {
+                "name": "base",
+                "scored": {
+                    "mcq": "scored/base_mcq.xlsx",
+                    "vqa": "scored/base_vqa.xlsx",
+                },
+            }
+        ],
+    )
+
+    assert is_pipeline_config(path) is True
+
+
 def _adaptation_config(tmp_path):
     return load_pipeline_config(
         _write_pipeline(

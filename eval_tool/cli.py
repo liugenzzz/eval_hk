@@ -118,12 +118,15 @@ def _handle_infer(args: argparse.Namespace) -> Any:
             raise ConfigError(
                 f"legacy infer config contains only model: {config.model_name}"
             )
-    if args.overwrite or args.clean_partial:
-        config = replace(
-            config,
-            overwrite=True if args.overwrite else config.overwrite,
-            clean_partial=args.clean_partial or config.clean_partial,
-        )
+    # The new subcommand is resume-safe even when adapting an old infer schema.
+    # The standalone ``python -m eval_tool.run_infer`` entry point still preserves
+    # the legacy config semantics for R9 compatibility.
+    config = replace(
+        config,
+        resume=True,
+        overwrite=args.overwrite,
+        clean_partial=args.clean_partial or config.clean_partial,
+    )
     return run_infer_stage(config)
 
 
@@ -189,13 +192,12 @@ def _handle_sweep(args: argparse.Namespace) -> Any:
 
 
 def _handle_all(args: argparse.Namespace) -> Any:
-    if args.rubric:
-        raise PipelineError("--rubric support is added by the rubric stage")
     return run_all(
         _require_pipeline(args.config),
         args.models,
         overwrite=args.overwrite,
         clean_partial=args.clean_partial,
+        rubric=args.rubric,
     )
 
 

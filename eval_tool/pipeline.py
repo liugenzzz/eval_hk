@@ -145,6 +145,7 @@ def run_all(
     generator_factory: Callable[[str], Any] | None = None,
     overwrite: bool = False,
     clean_partial: bool = False,
+    rubric: str | None = None,
 ) -> dict[str, Any]:
     converted: Path | None = None
     if config.convert_input is not None:
@@ -158,5 +159,9 @@ def run_all(
         overwrite,
         clean_partial,
     )
-    evaluated = run_evaluation(config, model_names)
+    evaluated = (
+        run_evaluation(config, model_names)
+        if rubric is None
+        else run_rubric_evaluation(config, rubric, model_names)
+    )
     return {"convert": converted, "infer": inferred, "eval": evaluated}

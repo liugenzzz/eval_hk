@@ -60,6 +60,31 @@ def test_run_all_orders_convert_infer_eval(tmp_path, monkeypatch):
     assert calls[2][2] == "generator:sft"
 
 
+def test_run_all_can_finish_with_selected_rubric(tmp_path, monkeypatch):
+    config = _pipeline_config(tmp_path)
+    calls = []
+    monkeypatch.setattr(
+        "eval_tool.pipeline.run_conversion",
+        lambda pipeline: calls.append("convert"),
+    )
+    monkeypatch.setattr(
+        "eval_tool.pipeline.run_inference",
+        lambda *args, **kwargs: calls.append("infer") or {},
+    )
+    monkeypatch.setattr(
+        "eval_tool.pipeline.run_rubric_evaluation",
+        lambda pipeline, version, model_names: calls.append(
+            ("rubric", version, model_names)
+        )
+        or {"report": tmp_path / "report_v4"},
+    )
+
+    result = run_all(config, model_names=["base"], rubric="v4")
+
+    assert calls == ["convert", "infer", ("rubric", "v4", ["base"])]
+    assert result["eval"] == {"report": tmp_path / "report_v4"}
+
+
 def test_inference_stops_after_first_failed_model(tmp_path, monkeypatch):
     config = _pipeline_config(tmp_path)
     calls = []

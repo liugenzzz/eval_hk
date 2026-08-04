@@ -88,6 +88,35 @@ def test_infer_subcommand_accepts_legacy_infer_schema(tmp_path, monkeypatch):
     assert seen[0].overwrite is True
 
 
+def test_unified_infer_makes_legacy_schema_resume_safe_by_default(
+    tmp_path, monkeypatch
+):
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "model_name": "base",
+                "model_path": "model",
+                "tsv_dir": "tsv",
+                "out_dir": "out",
+                "datasets": {"vqa": "aero_vqa"},
+                "prompt_files": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    seen = []
+    monkeypatch.setattr(
+        "eval_tool.cli.run_infer_stage",
+        lambda config, generator=None: seen.append(config) or {},
+    )
+
+    main(["infer", "--config", str(config_path)])
+
+    assert seen[0].resume is True
+    assert seen[0].overwrite is False
+
+
 def test_eval_subcommand_accepts_legacy_eval_schema(tmp_path, monkeypatch):
     config_path = tmp_path / "eval.json"
     config_path.write_text(
@@ -168,6 +197,28 @@ def test_sweep_cli_parses_rubrics_models_and_statistics_options(monkeypatch):
     assert captured[0].no_pairwise is True
     assert captured[0].metric == "quality_score"
     assert captured[0].n_bootstrap == 50
+
+
+def test_all_cli_passes_selected_rubric(monkeypatch):
+    calls = []
+    monkeypatch.setattr("eval_tool.cli._require_pipeline", lambda path: "pipeline")
+    monkeypatch.setattr(
+        "eval_tool.cli.run_all",
+        lambda *args, **kwargs: calls.append((args, kwargs)) or {},
+    )
+
+    main(["all", "--config", "pipeline.json", "--rubric", "v4"])
+
+    assert calls == [
+        (
+            ("pipeline", None),
+            {
+                "overwrite": False,
+                "clean_partial": False,
+                "rubric": "v4",
+            },
+        )
+    ]
 
 
 def test_eval_rubric_dry_run_derives_without_running(tmp_path, monkeypatch, capsys):
