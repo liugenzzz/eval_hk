@@ -28,6 +28,11 @@ VALID_JUDGE = {
     "max_workers": 3,
 }
 
+INVALID_PATH_VALUES = [
+    pytest.param("bad\x00name", id="nul"),
+    pytest.param("x" * 40_000, id="too-long"),
+]
+
 
 def _write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -125,6 +130,61 @@ def test_cli_inputs_replace_config_inputs_and_resolve_from_invocation_dir(tmp_pa
 
     assert config.inputs == (override.resolve(),)
     assert (config_dir / "data/records.jsonl").resolve() not in config.inputs
+
+
+@pytest.mark.parametrize(
+    ("field", "error_field"),
+    [
+        ("inputs", r"inputs\[0\]"),
+        ("model_path", "infer.model_path"),
+        ("output_dir", "output_dir"),
+        ("work_dir", "work_dir"),
+        ("image_root", "image_root"),
+    ],
+)
+@pytest.mark.parametrize("invalid_path", INVALID_PATH_VALUES)
+def test_config_path_fields_normalize_filesystem_errors(
+    tmp_path, field, error_field, invalid_path
+):
+    config_path, _, raw = _write_config(tmp_path)
+    if field == "inputs":
+        raw["inputs"] = [invalid_path]
+    elif field == "model_path":
+        infer = raw["infer"]
+        assert isinstance(infer, dict)
+        infer["model_path"] = invalid_path
+    else:
+        raw[field] = invalid_path
+    _write_json(config_path, raw)
+
+    with pytest.raises(DpoConfigError, match=error_field):
+        load_dpo_config(config_path, invocation_dir=tmp_path)
+
+
+@pytest.mark.parametrize("invalid_path", INVALID_PATH_VALUES)
+def test_cli_input_path_errors_are_normalized(tmp_path, invalid_path):
+    config_path, _, _ = _write_config(tmp_path)
+
+    with pytest.raises(DpoConfigError, match=r"inputs\[0\]"):
+        load_dpo_config(
+            config_path,
+            input_overrides=[invalid_path],
+            invocation_dir=tmp_path,
+        )
+
+
+@pytest.mark.parametrize("invalid_path", INVALID_PATH_VALUES)
+def test_config_path_argument_errors_are_normalized(tmp_path, invalid_path):
+    with pytest.raises(DpoConfigError, match="config_path"):
+        load_dpo_config(invalid_path, invocation_dir=tmp_path)
+
+
+@pytest.mark.parametrize("invalid_path", INVALID_PATH_VALUES)
+def test_invocation_dir_errors_are_normalized(tmp_path, invalid_path):
+    config_path, _, _ = _write_config(tmp_path)
+
+    with pytest.raises(DpoConfigError, match="invocation_dir"):
+        load_dpo_config(config_path, invocation_dir=Path(invalid_path))
 
 
 @pytest.mark.parametrize("value", [None, "false", 0, 1, [], {}])
@@ -233,6 +293,21 @@ def test_wrong_only_maps_complete_judge_settings_without_output(tmp_path, capsys
     assert config.judge.settings.timeout == VALID_JUDGE["timeout"]
     assert config.judge.settings.max_retries == VALID_JUDGE["max_retries"]
     assert capsys.readouterr() == ("", "")
+
+
+def test_wrong_only_v4_uses_default_judge_max_workers(tmp_path):
+    config_path, _, raw = _write_config(tmp_path, wrong_only=True)
+    raw["rubric"] = "v4"
+    judge = raw["judge"]
+    assert isinstance(judge, dict)
+    del judge["max_workers"]
+    _write_json(config_path, raw)
+
+    config = load_dpo_config(config_path, invocation_dir=tmp_path)
+
+    assert config.rubric == "v4"
+    assert config.judge is not None
+    assert config.judge.max_workers == 8
 
 
 def test_dpo_types_are_frozen_and_config_error_inherits_existing_error(tmp_path):

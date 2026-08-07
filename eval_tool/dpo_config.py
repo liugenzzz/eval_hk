@@ -5,7 +5,7 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Literal, Sequence
+from typing import Callable, Literal, Sequence, TypeVar
 
 from .config import ConfigError
 from .judge import JudgeSettings
@@ -110,6 +110,36 @@ _WINDOWS_DEVICE_NAMES = {
 }
 _WINDOWS_SUPERSCRIPT_DIGITS = str.maketrans({"¹": "1", "²": "2", "³": "3"})
 
+_PathResult = TypeVar("_PathResult")
+
+
+def _path_operation(
+    field_name: str, operation: Callable[[], _PathResult]
+) -> _PathResult:
+    try:
+        return operation()
+    except DpoConfigError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise DpoConfigError(
+            f"{field_name} could not be processed as a filesystem path"
+        ) from exc
+
+
+def _resolved_path(
+    value: str | Path,
+    *,
+    base_dir: Path | None,
+    field_name: str,
+) -> Path:
+    def resolve() -> Path:
+        candidate = Path(value)
+        if base_dir is not None and not candidate.is_absolute():
+            candidate = base_dir / candidate
+        return candidate.resolve()
+
+    return _path_operation(field_name, resolve)
+
 
 def load_dpo_config(
     path: str | Path,
@@ -119,13 +149,18 @@ def load_dpo_config(
 ) -> DpoBuildConfig:
     """Load and validate the independent JSON DPO-builder configuration."""
 
-    config_path = Path(path).resolve()
-    invocation_base = (
-        Path.cwd().resolve()
+    config_path = _resolved_path(path, base_dir=None, field_name="config_path")
+    invocation_value = (
+        _path_operation("invocation_dir", Path.cwd)
         if invocation_dir is None
-        else Path(invocation_dir).resolve()
+        else invocation_dir
     )
-    if not invocation_base.is_dir():
+    invocation_base = _resolved_path(
+        invocation_value,
+        base_dir=None,
+        field_name="invocation_dir",
+    )
+    if not _path_operation("invocation_dir", invocation_base.is_dir):
         raise DpoConfigError("invocation_dir must be an existing directory")
 
     raw = _load_json_object(config_path)
@@ -149,12 +184,17 @@ def load_dpo_config(
     _require_directory_if_present(work_dir, "work_dir")
 
     output_name = _safe_output_name(raw.get("output_name"))
-    if (output_dir / output_name).resolve().parent != output_dir.resolve():
+    publish_path = _resolved_path(
+        output_name,
+        base_dir=output_dir,
+        field_name="output_name",
+    )
+    if publish_path.parent != output_dir:
         raise DpoConfigError("output_name must remain inside output_dir")
 
     if "image_root" in raw:
         image_root = _config_path(raw["image_root"], base_dir, "image_root")
-        if not image_root.is_dir():
+        if not _path_operation("image_root", image_root.is_dir):
             raise DpoConfigError("image_root must be an existing directory")
     else:
         image_root = invocation_base
@@ -177,11 +217,19 @@ def load_dpo_config(
 
 
 def _load_json_object(path: Path) -> dict[str, object]:
-    if not path.is_file():
+    if not _path_operation("config_path", path.is_file):
         raise DpoConfigError(f"DPO config file does not exist: {path}")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        text = path.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        raise DpoConfigError(f"cannot read DPO config: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise DpoConfigError(
+            "config_path could not be processed as a filesystem path"
+        ) from exc
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as exc:
         raise DpoConfigError(f"cannot read DPO config: {exc}") from exc
     if not isinstance(value, dict):
         raise DpoConfigError("DPO config must be a JSON object")
@@ -212,8 +260,7 @@ def _nonempty_string(value: object, field_name: str) -> str:
 
 def _config_path(value: object, base_dir: Path, field_name: str) -> Path:
     text = _nonempty_string(value, field_name)
-    candidate = Path(text)
-    return candidate.resolve() if candidate.is_absolute() else (base_dir / candidate).resolve()
+    return _resolved_path(text, base_dir=base_dir, field_name=field_name)
 
 
 def _override_path(value: object, base_dir: Path, field_name: str) -> Path:
@@ -223,8 +270,7 @@ def _override_path(value: object, base_dir: Path, field_name: str) -> Path:
             raise DpoConfigError(f"{field_name} must be a non-empty path")
     else:
         text = _nonempty_string(value, field_name)
-    candidate = Path(text)
-    return candidate.resolve() if candidate.is_absolute() else (base_dir / candidate).resolve()
+    return _resolved_path(text, base_dir=base_dir, field_name=field_name)
 
 
 def _load_inputs(
@@ -250,14 +296,16 @@ def _load_inputs(
     resolved: list[Path] = []
     for index, value in enumerate(values):
         input_path = resolver(value, path_base, f"inputs[{index}]")
-        if not input_path.is_file():
+        if not _path_operation(f"inputs[{index}]", input_path.is_file):
             raise DpoConfigError(f"inputs[{index}] must be an existing file: {input_path}")
         resolved.append(input_path)
     return tuple(resolved)
 
 
 def _require_directory_if_present(path: Path, field_name: str) -> None:
-    if path.exists() and not path.is_dir():
+    if _path_operation(field_name, path.exists) and not _path_operation(
+        field_name, path.is_dir
+    ):
         raise DpoConfigError(f"{field_name} must be a directory path")
 
 
@@ -268,7 +316,7 @@ def _load_infer(value: object, base_dir: Path) -> DpoInferConfig:
 
     model_name = _nonempty_string(value.get("model_name"), "infer.model_name")
     model_path = _config_path(value.get("model_path"), base_dir, "infer.model_path")
-    if not model_path.exists():
+    if not _path_operation("infer.model_path", model_path.exists):
         raise DpoConfigError(f"infer.model_path does not exist: {model_path}")
 
     enable_thinking = _strict_bool(
@@ -398,7 +446,10 @@ def _safe_output_name(value: object) -> str:
         )
     name = _nonempty_string(value, "output_name")
     lowered = name.casefold()
-    windows_name = PureWindowsPath(name)
+    windows_name = _path_operation(
+        "output_name", lambda: PureWindowsPath(name)
+    )
+    native_name = _path_operation("output_name", lambda: Path(name))
     windows_device_stem = (
         name.split(".", 1)[0]
         .rstrip(" .")
@@ -412,8 +463,8 @@ def _safe_output_name(value: object) -> str:
         or "/" in name
         or "\\" in name
         or ".." in name
-        or Path(name).is_absolute()
-        or windows_name.is_absolute()
+        or _path_operation("output_name", native_name.is_absolute)
+        or _path_operation("output_name", windows_name.is_absolute)
         or bool(windows_name.drive)
         or any(character in unsafe_characters or ord(character) < 32 for character in name)
         or lowered in _RESERVED_OUTPUT_NAMES
