@@ -187,6 +187,32 @@ def test_digest_is_canonical_across_containers_and_changes_with_value(tmp_path):
     assert all(character in "0123456789abcdef" for character in expected)
 
 
+def test_duplicate_keys_use_stdlib_last_value_across_containers(tmp_path):
+    module = _dpo_input()
+    duplicate_object = (
+        '{"id":"first","id":"last","payload":"old","payload":"new"}'
+    )
+    expected = {"id": "last", "payload": "new"}
+    object_path = tmp_path / "duplicate-object.json"
+    object_path.write_text(duplicate_object, encoding="utf-8")
+    jsonl_path = tmp_path / "duplicate-lines.jsonl"
+    jsonl_path.write_text(
+        duplicate_object + '\n{"id":"tail"}\n', encoding="utf-8"
+    )
+
+    object_records = module.load_source_records(object_path, input_index=0)
+    jsonl_records = module.load_source_records(jsonl_path, input_index=1)
+
+    assert object_records[0].value == expected
+    assert object_records[0].source.container_format == "json_object"
+    assert object_records[0].source.source_id == "last"
+    assert object_records[0].source.raw_digest == _canonical_digest(expected)
+    assert jsonl_records[0].value == expected
+    assert jsonl_records[0].source.container_format == "jsonl"
+    assert jsonl_records[0].source.source_id == "last"
+    assert jsonl_records[0].source.raw_digest == _canonical_digest(expected)
+
+
 @pytest.mark.parametrize("text", ["null", '"text"', "1", "true"])
 def test_rejects_complete_top_level_json_scalar(tmp_path, text):
     module = _dpo_input()
@@ -234,6 +260,21 @@ def test_invalid_jsonl_reports_source_path_and_physical_line(
     message = str(caught.value)
     assert str(path.resolve()) in message
     assert f"line {line_number}" in message.lower()
+
+
+def test_rejects_multiline_jsonl_record_at_its_first_physical_line(tmp_path):
+    module = _dpo_input()
+    path = tmp_path / "multiline.jsonl"
+    path.write_text(
+        '{\n  "id": "multiline"\n}\n{"id":"second"}\n', encoding="utf-8"
+    )
+
+    with pytest.raises(module.DpoInputError) as caught:
+        module.load_source_records(path, input_index=0)
+
+    message = str(caught.value)
+    assert str(path.resolve()) in message
+    assert "line 1" in message.lower()
 
 
 @pytest.mark.parametrize("value", [123, [], None])
