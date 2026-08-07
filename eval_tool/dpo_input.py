@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import math
 from dataclasses import dataclass
@@ -114,7 +115,8 @@ def _load_jsonl(
     input_index: int,
 ) -> list[RawRecord]:
     records: list[RawRecord] = []
-    for line_number, line in enumerate(text.splitlines(), start=1):
+    lines = io.StringIO(text, newline="\n")
+    for line_number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
         try:
@@ -158,6 +160,16 @@ def _raw_record(
         if isinstance(source_id_value, str) and source_id_value != ""
         else None
     )
+    try:
+        raw_digest = _raw_digest(value)
+    except (TypeError, UnicodeError, ValueError) as exc:
+        line_location = (
+            f" at line {line_number}" if line_number is not None else ""
+        )
+        raise DpoInputError(
+            f"cannot canonicalize DPO input {source_path}, "
+            f"record index {record_index}{line_location}"
+        ) from exc
     source = SourceRef(
         input_index=input_index,
         source_path=source_path,
@@ -165,7 +177,7 @@ def _raw_record(
         record_index=record_index,
         line_number=line_number,
         source_id=source_id,
-        raw_digest=_raw_digest(value),
+        raw_digest=raw_digest,
     )
     return RawRecord(source=source, value=value)
 

@@ -187,6 +187,20 @@ def test_digest_is_canonical_across_containers_and_changes_with_value(tmp_path):
     assert all(character in "0123456789abcdef" for character in expected)
 
 
+def test_digest_matches_known_canonical_sha256_vector(tmp_path):
+    module = _dpo_input()
+    path = tmp_path / "known-digest.json"
+    path.write_text(
+        '{"z":"\\u8230","a":[1,true,null]}', encoding="utf-8"
+    )
+
+    records = module.load_source_records(path, input_index=0)
+
+    assert records[0].source.raw_digest == (
+        "d1fafc7c1433a58a795d4e37286ed90644a06470ea4a267834772b0d8db17b8e"
+    )
+
+
 def test_duplicate_keys_use_stdlib_last_value_across_containers(tmp_path):
     module = _dpo_input()
     duplicate_object = (
@@ -277,6 +291,53 @@ def test_rejects_multiline_jsonl_record_at_its_first_physical_line(tmp_path):
     assert "line 1" in message.lower()
 
 
+def test_jsonl_keeps_raw_u2028_inside_string_on_same_physical_line(tmp_path):
+    module = _dpo_input()
+    path = tmp_path / "raw-line-separator.jsonl"
+    separator = "\u2028"
+    path.write_text(
+        '{"id":"first","text":"before'
+        + separator
+        + 'after"}\n{"id":"second"}\n',
+        encoding="utf-8",
+    )
+
+    records = module.load_source_records(path, input_index=0)
+
+    assert [record.value for record in records] == [
+        {"id": "first", "text": "before" + separator + "after"},
+        {"id": "second"},
+    ]
+    assert [record.source.line_number for record in records] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "separator",
+    [
+        pytest.param("\u2028", id="line-separator"),
+        pytest.param("\u2029", id="paragraph-separator"),
+        pytest.param("\u0085", id="next-line"),
+    ],
+)
+def test_unicode_separators_between_objects_do_not_create_jsonl_lines(
+    tmp_path, separator
+):
+    module = _dpo_input()
+    path = tmp_path / "not-physical-lines.jsonl"
+    path.write_text(
+        '{"id":"first"}' + separator + '{"id":"second"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.DpoInputError) as caught:
+        module.load_source_records(path, input_index=0)
+
+    message = str(caught.value)
+    assert str(path.resolve()) in message
+    assert "line 1" in message.lower()
+    assert "line 2" not in message.lower()
+
+
 @pytest.mark.parametrize("value", [123, [], None])
 def test_rejects_non_object_jsonl_records(tmp_path, value):
     module = _dpo_input()
@@ -328,6 +389,49 @@ def test_rejects_json_number_that_overflows_to_infinity(tmp_path):
         module.load_source_records(path, input_index=0)
 
     assert str(path.resolve()) in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("text", "record_index", "line_number"),
+    [
+        pytest.param(
+            r'{"id":"single","text":"\ud800","marker":"SURROGATE_SECRET"}',
+            0,
+            None,
+            id="single-object",
+        ),
+        pytest.param(
+            r'[{"id":"ok"},{"id":"array","text":"\udfff","marker":"SURROGATE_SECRET"}]',
+            1,
+            None,
+            id="array-item",
+        ),
+        pytest.param(
+            '{"id":"ok"}\n\n'
+            + r'{"id":"jsonl","text":"\ud800","marker":"SURROGATE_SECRET"}'
+            + "\n",
+            1,
+            3,
+            id="jsonl-record",
+        ),
+    ],
+)
+def test_rejects_lone_surrogate_with_record_location(
+    tmp_path, text, record_index, line_number
+):
+    module = _dpo_input()
+    path = tmp_path / "lone-surrogate.json"
+    path.write_text(text, encoding="utf-8")
+
+    with pytest.raises(module.DpoInputError) as caught:
+        module.load_source_records(path, input_index=0)
+
+    message = str(caught.value)
+    assert str(path.resolve()) in message
+    assert f"record index {record_index}" in message.lower()
+    if line_number is not None:
+        assert f"line {line_number}" in message.lower()
+    assert "SURROGATE_SECRET" not in message
 
 
 def test_normalizes_read_errors_with_resolved_path(tmp_path, monkeypatch):
