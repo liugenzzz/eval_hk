@@ -647,6 +647,7 @@ def test_alpaca_history_expands_every_gold_turn(tmp_path):
 @pytest.mark.parametrize(
     ("history", "reason"),
     [
+        (None, "unpaired_turns"),
         ("not-a-list", "unpaired_turns"),
         (["not-a-pair"], "unpaired_turns"),
         ([[]], "unpaired_turns"),

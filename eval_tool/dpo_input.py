@@ -399,8 +399,9 @@ def _alpaca_pairs(
     else:
         return [], ("invalid_schema", "input must be a string or null")
 
+    history_present = "history" in value
     history = value.get("history")
-    if history is None or history == []:
+    if not history_present or history == []:
         pairs: list[tuple[str, str]] = []
     elif not isinstance(history, list):
         return [], ("unpaired_turns", "history must be a list of pairs")
