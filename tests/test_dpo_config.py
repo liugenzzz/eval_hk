@@ -300,6 +300,12 @@ def test_output_name_must_end_with_jsonl(tmp_path, output_name):
         "CON.jsonl",
         "nul.jsonl",
         "LPT1.jsonl",
+        "COM¹.jsonl",
+        "LPT².jsonl",
+        "CON .jsonl",
+        "NUL .jsonl",
+        "CONIN$.jsonl",
+        "CONOUT$.jsonl",
         "audit_records.jsonl",
         "rejected_records.jsonl",
         "summary.json",
@@ -340,6 +346,7 @@ def test_output_name_must_be_a_safe_nonreserved_basename(tmp_path, output_name):
         ("judge", "temperature", 2.1),
         ("judge", "temperature", float("nan")),
         ("judge", "temperature", float("inf")),
+        ("judge", "temperature", 10**309),
     ],
 )
 def test_numeric_fields_reject_bool_and_invalid_ranges(tmp_path, section, field, value):

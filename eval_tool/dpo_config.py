@@ -103,9 +103,12 @@ _WINDOWS_DEVICE_NAMES = {
     "aux",
     "nul",
     "clock$",
+    "conin$",
+    "conout$",
     *(f"com{index}" for index in range(1, 10)),
     *(f"lpt{index}" for index in range(1, 10)),
 }
+_WINDOWS_SUPERSCRIPT_DIGITS = str.maketrans({"¹": "1", "²": "2", "³": "3"})
 
 
 def load_dpo_config(
@@ -377,7 +380,12 @@ def _load_judge_mode(
 def _temperature(value: object) -> float:
     if type(value) not in {int, float}:
         raise DpoConfigError("judge.temperature must be a JSON number")
-    temperature = float(value)
+    try:
+        temperature = float(value)
+    except OverflowError as exc:
+        raise DpoConfigError(
+            "judge.temperature must be finite and between 0 and 2"
+        ) from exc
     if not math.isfinite(temperature) or not 0.0 <= temperature <= 2.0:
         raise DpoConfigError("judge.temperature must be finite and between 0 and 2")
     return temperature
@@ -391,6 +399,12 @@ def _safe_output_name(value: object) -> str:
     name = _nonempty_string(value, "output_name")
     lowered = name.casefold()
     windows_name = PureWindowsPath(name)
+    windows_device_stem = (
+        name.split(".", 1)[0]
+        .rstrip(" .")
+        .casefold()
+        .translate(_WINDOWS_SUPERSCRIPT_DIGITS)
+    )
     unsafe_characters = set('<>:"|?*')
 
     if (
@@ -403,7 +417,7 @@ def _safe_output_name(value: object) -> str:
         or bool(windows_name.drive)
         or any(character in unsafe_characters or ord(character) < 32 for character in name)
         or lowered in _RESERVED_OUTPUT_NAMES
-        or name.split(".", 1)[0].casefold() in _WINDOWS_DEVICE_NAMES
+        or windows_device_stem in _WINDOWS_DEVICE_NAMES
     ):
         raise DpoConfigError(
             "output_name must be a safe, nonreserved .jsonl basename"
