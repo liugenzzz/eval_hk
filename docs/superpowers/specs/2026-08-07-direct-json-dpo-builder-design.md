@@ -1,7 +1,7 @@
 # 直接 JSON/JSONL DPO 构建功能设计
 
 日期：2026-08-07
-状态：方案已确认，书面规格待用户复核，尚未进入实现
+状态：用户已复核批准；2026-08-07 已授权开始实施
 参考脚本：`F:/AI-Haishi/智航院/script/build_dpo.py`、`F:/AI-Haishi/智航院/script/build_dpo_binary.py`
 
 ## 1. 背景
