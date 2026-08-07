@@ -549,6 +549,10 @@ def _resolve_image_refs(
 
         if is_absolute:
             unresolved = image_path
+        elif image_path.drive or image_path.root:
+            refs.append(ImageRef(original=original, resolved=image_path))
+            errors.add(index)
+            continue
         else:
             if not root_attempted:
                 root_attempted = True

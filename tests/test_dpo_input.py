@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import os
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from types import ModuleType
@@ -1081,6 +1082,37 @@ def test_absolute_image_path_is_not_rebased_under_image_root(tmp_path):
 
     assert result.issues == ()
     assert result.candidates[0].images[0].resolved == image_path.resolve()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path classification")
+@pytest.mark.parametrize(
+    "original",
+    [r"\outside.bin", "/outside.bin", r"C:outside.bin"],
+)
+def test_windows_rooted_or_drive_relative_images_are_rejected_without_stat(
+    tmp_path, monkeypatch, original
+):
+    module = _dpo_input()
+    stat_calls = []
+
+    def accept_any_file(path):
+        stat_calls.append(path)
+        return True
+
+    monkeypatch.setattr(Path, "is_file", accept_any_file)
+    value = {
+        "instruction": "<image> question",
+        "output": "a",
+        "image": original,
+    }
+
+    result = module.normalize_record(_raw_record(module, value), image_root=tmp_path)
+
+    assert result.candidates == ()
+    assert len(result.issues) == 1
+    assert result.issues[0].reason_code == "missing_image"
+    assert result.issues[0].sample_id is not None
+    assert stat_calls == []
 
 
 def test_future_turn_images_do_not_leak_and_future_missing_image_keeps_early_turn(
