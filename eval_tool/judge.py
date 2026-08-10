@@ -84,15 +84,27 @@ class JudgeClient:
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image}"}})
         else:
             user_content = user_text
+        return self._post_messages(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ]
+        )
+
+    def _post_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 1024,
+    ) -> str:
+        if type(max_tokens) is not int or max_tokens < 1:
+            raise ValueError("max_tokens must be a positive integer")
         body = json.dumps(
             {
                 "model": self.settings.model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
+                "messages": messages,
                 "temperature": self.settings.temperature,
-                "max_tokens": 1024,
+                "max_tokens": max_tokens,
             },
             ensure_ascii=False,
         ).encode("utf-8")
@@ -108,6 +120,15 @@ class JudgeClient:
         with urllib.request.urlopen(req, timeout=self.settings.timeout) as resp:
             out = json.loads(resp.read().decode("utf-8"))
         return out["choices"][0]["message"]["content"]
+
+    def judge_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int = 1024,
+    ) -> str:
+        """Send caller-assembled multi-turn/multi-image OpenAI messages."""
+        return self._post_messages(messages, max_tokens=max_tokens)
 
     def judge_pointwise(
         self,

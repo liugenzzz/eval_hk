@@ -82,3 +82,20 @@ def test_judge_client_uses_external_pairwise_prompt():
     assert winner == "tie"
     assert reason == "same"
     assert client.calls[0][0] == "external pair prompt"
+
+
+def test_judge_client_exposes_structured_message_transport():
+    class StructuredJudgeClient(JudgeClient):
+        def __init__(self, settings):
+            super().__init__(settings)
+            self.calls = []
+
+        def _post_messages(self, messages, *, max_tokens=1024):
+            self.calls.append((messages, max_tokens))
+            return "raw response"
+
+    client = StructuredJudgeClient(JudgeSettings())
+    messages = [{"role": "user", "content": "hello"}]
+
+    assert client.judge_messages(messages, max_tokens=77) == "raw response"
+    assert client.calls == [(messages, 77)]
