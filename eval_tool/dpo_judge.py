@@ -1,17 +1,29 @@
 from __future__ import annotations
 
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, Mapping, cast
+from typing import Any, Callable, Literal, Mapping, Sequence, cast
 
+from .dpo_cache import (
+    DpoJudgeParseStore,
+    DpoJudgeRawStore,
+    build_judge_parse_fp,
+    build_judge_request_fp,
+)
+from .dpo_config import DpoJudgeConfig
 from .dpo_input import DpoCandidate, ImageRef
 from .dpo_multimodal import ImageAsset, image_data_url
 from .dpo_prompts import RubricName, _rubric_for_prompt
+from .judge import JudgeClient, JudgeSettings
 from .judge_rubrics import extract_json_object, parse_v1, parse_v4
 
 
 _IMAGE_MARKER = "<image>"
+_JUDGE_MAX_TOKENS = 1024
 
 
 class DpoJudgeError(ValueError):
@@ -26,6 +38,45 @@ class DpoJudgeRequest:
     messages: tuple[dict[str, Any], ...]
     image_assets: tuple[ImageAsset, ...]
     fingerprint_material: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class JudgeJob:
+    candidate: DpoCandidate
+    rejected: str
+    inference_fp: str
+    request: DpoJudgeRequest
+
+
+@dataclass(frozen=True)
+class JudgeOutcome:
+    sample_id: str
+    request_fp: str
+    parse_fp: str | None
+    raw_response: str | None
+    parsed: Mapping[str, object] | None
+    error_type: str | None
+    error_message: str | None
+
+
+JudgeParseStoreFactory = Callable[
+    [tuple[tuple[str, str], ...]], DpoJudgeParseStore
+]
+
+
+@dataclass(frozen=True)
+class _PreparedJudgeJob:
+    job: JudgeJob
+    request_fp: str
+
+
+@dataclass(frozen=True)
+class _TransportResult:
+    sample_id: str
+    request_fp: str
+    raw_response: str | None
+    error_type: str | None
+    error_message: str | None
 
 
 def build_dpo_judge_request(
@@ -107,6 +158,316 @@ def build_dpo_judge_request(
         image_assets=bound_assets,
         fingerprint_material=fingerprint_material,
     )
+
+
+def judge_candidates(
+    jobs: Sequence[JudgeJob],
+    config: DpoJudgeConfig,
+    raw_store: DpoJudgeRawStore,
+    parse_store: DpoJudgeParseStore | JudgeParseStoreFactory,
+    *,
+    client_factory: Callable[[JudgeSettings], JudgeClient] | None = None,
+) -> dict[str, JudgeOutcome]:
+    """Run Judge transport and parsing as two strict, independently resumable phases.
+
+    Raw responses are all requested and reloaded before parse fingerprints are
+    computed. A parse-store factory is therefore the normal first-run API: it
+    receives the exact ordered composite keys derived from the actual raw bytes.
+    A preconstructed store remains useful for parser-only resume and must declare
+    exactly those same keys.
+    """
+
+    ordered = tuple(jobs)
+    prepared = _prepare_jobs(ordered, config.settings)
+    expected_raw_keys = tuple(
+        (item.job.candidate.sample_id, item.request_fp) for item in prepared
+    )
+    _require_store_expected_keys(raw_store, expected_raw_keys, label="Judge raw")
+
+    raw_cached = raw_store.load()
+    transport_errors: dict[str, _TransportResult] = {}
+    pending = tuple(
+        item
+        for item in prepared
+        if (item.job.candidate.sample_id, item.request_fp) not in raw_cached
+    )
+    if pending:
+        try:
+            _request_pending_raw(
+                pending,
+                config,
+                raw_store,
+                transport_errors,
+                client_factory=client_factory,
+            )
+        finally:
+            raw_store.sync()
+
+    # Never compute a parse identity from an in-memory response that failed to
+    # become durable. Reloading is the phase boundary and gives cache validation
+    # the final word before parsing starts.
+    raw_cached = raw_store.load()
+    if all(key in raw_cached for key in expected_raw_keys):
+        _mark_complete(raw_store)
+
+    raw_by_sample: dict[str, tuple[str, str]] = {}
+    parse_keys: list[tuple[str, str]] = []
+    for item in prepared:
+        sample_id = item.job.candidate.sample_id
+        record = raw_cached.get((sample_id, item.request_fp))
+        if record is None:
+            continue
+        raw_response = record["raw_response"]
+        parse_fp = build_judge_parse_fp(
+            item.request_fp,
+            raw_response,
+            item.job.request.rubric,
+            item.job.request.has_images,
+        )
+        raw_by_sample[sample_id] = (raw_response, parse_fp)
+        parse_keys.append((sample_id, parse_fp))
+
+    expected_parse_keys = tuple(parse_keys)
+    actual_parse_store: DpoJudgeParseStore | None
+    if expected_parse_keys:
+        actual_parse_store = (
+            parse_store(expected_parse_keys) if callable(parse_store) else parse_store
+        )
+        _require_store_expected_keys(
+            actual_parse_store,
+            expected_parse_keys,
+            label="Judge parse",
+        )
+        _parse_raw_responses(prepared, raw_by_sample, actual_parse_store)
+        parse_cached = actual_parse_store.load()
+        if all(key in parse_cached for key in expected_parse_keys):
+            _mark_complete(actual_parse_store)
+    else:
+        actual_parse_store = None
+        parse_cached = {}
+
+    outcomes: dict[str, JudgeOutcome] = {}
+    for item in prepared:
+        sample_id = item.job.candidate.sample_id
+        raw_and_fp = raw_by_sample.get(sample_id)
+        if raw_and_fp is None:
+            failed = transport_errors.get(sample_id)
+            if failed is None:
+                failed = _TransportResult(
+                    sample_id=sample_id,
+                    request_fp=item.request_fp,
+                    raw_response=None,
+                    error_type="judge_error",
+                    error_message="Judge raw response is missing after transport phase",
+                )
+            outcomes[sample_id] = JudgeOutcome(
+                sample_id=sample_id,
+                request_fp=item.request_fp,
+                parse_fp=None,
+                raw_response=None,
+                parsed=None,
+                error_type=failed.error_type or "judge_error",
+                error_message=failed.error_message,
+            )
+            continue
+
+        raw_response, parse_fp = raw_and_fp
+        record = parse_cached.get((sample_id, parse_fp))
+        if record is None:
+            raise DpoJudgeError(
+                f"Judge parse cache is missing terminal record for {sample_id}"
+            )
+        outcomes[sample_id] = JudgeOutcome(
+            sample_id=sample_id,
+            request_fp=item.request_fp,
+            parse_fp=parse_fp,
+            raw_response=raw_response,
+            parsed=record["result"] if record["status"] == "ok" else None,
+            error_type=record["error_type"],
+            error_message=record["error_message"],
+        )
+
+    return {
+        job.candidate.sample_id: outcomes[job.candidate.sample_id]
+        for job in ordered
+    }
+
+
+def _prepare_jobs(
+    jobs: tuple[JudgeJob, ...], settings: JudgeSettings
+) -> tuple[_PreparedJudgeJob, ...]:
+    prepared: list[_PreparedJudgeJob] = []
+    seen: set[str] = set()
+    for index, job in enumerate(jobs):
+        if not isinstance(job, JudgeJob):
+            raise DpoJudgeError(f"Judge job {index} is not a JudgeJob")
+        sample_id = job.candidate.sample_id
+        if not sample_id or sample_id in seen:
+            raise DpoJudgeError("Judge jobs require distinct non-empty sample IDs")
+        seen.add(sample_id)
+        if not isinstance(job.rejected, str):
+            raise DpoJudgeError("Judge rejected answer must be a string")
+        if not isinstance(job.inference_fp, str) or not job.inference_fp:
+            raise DpoJudgeError("Judge inference fingerprint must be non-empty")
+        if not isinstance(job.request, DpoJudgeRequest):
+            raise DpoJudgeError("Judge job request must be a DpoJudgeRequest")
+        request_fp = build_judge_request_fp(
+            job.inference_fp,
+            settings,
+            job.request.fingerprint_material,
+            job.request.image_assets,
+            max_tokens=_JUDGE_MAX_TOKENS,
+        )
+        prepared.append(_PreparedJudgeJob(job=job, request_fp=request_fp))
+    return tuple(prepared)
+
+
+def _request_pending_raw(
+    pending: tuple[_PreparedJudgeJob, ...],
+    config: DpoJudgeConfig,
+    raw_store: DpoJudgeRawStore,
+    errors: dict[str, _TransportResult],
+    *,
+    client_factory: Callable[[JudgeSettings], JudgeClient] | None,
+) -> None:
+    factory = client_factory or JudgeClient
+    thread_local = threading.local()
+    shared_client: JudgeClient | None = None
+    if bool(getattr(factory, "thread_safe", False)):
+        shared_client = factory(config.settings)
+
+    def client_for_thread() -> JudgeClient:
+        if shared_client is not None:
+            return shared_client
+        client = getattr(thread_local, "client", None)
+        if client is None:
+            client = factory(config.settings)
+            thread_local.client = client
+        return client
+
+    def request_one(item: _PreparedJudgeJob) -> _TransportResult:
+        last_error: BaseException | None = None
+        for attempt in range(config.settings.max_retries + 1):
+            try:
+                raw_response = client_for_thread().judge_messages(
+                    list(item.job.request.messages),
+                    max_tokens=_JUDGE_MAX_TOKENS,
+                )
+                if not isinstance(raw_response, str):
+                    raise TypeError("Judge raw response must be a string")
+                return _TransportResult(
+                    sample_id=item.job.candidate.sample_id,
+                    request_fp=item.request_fp,
+                    raw_response=raw_response,
+                    error_type=None,
+                    error_message=None,
+                )
+            except Exception as exc:
+                last_error = exc
+                if attempt < config.settings.max_retries:
+                    time.sleep(min(8.0, 0.5 * (2**attempt)))
+        assert last_error is not None
+        return _TransportResult(
+            sample_id=item.job.candidate.sample_id,
+            request_fp=item.request_fp,
+            raw_response=None,
+            error_type="judge_error",
+            error_message=_judge_exception_detail(last_error),
+        )
+
+    max_workers = min(config.max_workers, len(pending))
+    with ThreadPoolExecutor(
+        max_workers=max_workers,
+        thread_name_prefix="dpo-judge",
+    ) as executor:
+        future_to_item = {
+            executor.submit(request_one, item): item for item in pending
+        }
+        for future in as_completed(future_to_item):
+            result = future.result()
+            if result.raw_response is None:
+                errors[result.sample_id] = result
+                continue
+            # The coordinator is the only cache writer. In particular, no parser
+            # can observe this response until append succeeds and the raw phase is
+            # reloaded below.
+            raw_store.append_batch(
+                [
+                    {
+                        "sample_id": result.sample_id,
+                        "judge_request_fp": result.request_fp,
+                        "raw_response": result.raw_response,
+                    }
+                ]
+            )
+
+
+def _parse_raw_responses(
+    prepared: tuple[_PreparedJudgeJob, ...],
+    raw_by_sample: Mapping[str, tuple[str, str]],
+    parse_store: DpoJudgeParseStore,
+) -> None:
+    cached = parse_store.load()
+    try:
+        for item in prepared:
+            sample_id = item.job.candidate.sample_id
+            raw_and_fp = raw_by_sample.get(sample_id)
+            if raw_and_fp is None:
+                continue
+            raw_response, parse_fp = raw_and_fp
+            if (sample_id, parse_fp) in cached:
+                continue
+            try:
+                parsed = parse_dpo_judge_response(
+                    raw_response,
+                    item.job.request.rubric,
+                    item.job.request.has_images,
+                )
+            except Exception as exc:
+                record: dict[str, object] = {
+                    "sample_id": sample_id,
+                    "judge_parse_fp": parse_fp,
+                    "status": "error",
+                    "result": None,
+                    "error_type": "judge_error",
+                    "error_message": _judge_exception_detail(exc),
+                }
+            else:
+                record = {
+                    "sample_id": sample_id,
+                    "judge_parse_fp": parse_fp,
+                    "status": "ok",
+                    "result": dict(parsed),
+                    "error_type": None,
+                    "error_message": None,
+                }
+            parse_store.append_batch([record])
+    finally:
+        parse_store.sync()
+
+
+def _require_store_expected_keys(
+    store: object,
+    expected: tuple[tuple[str, str], ...],
+    *,
+    label: str,
+) -> None:
+    declared = getattr(store, "expected_keys", None)
+    if declared is not None and tuple(declared) != expected:
+        raise DpoJudgeError(
+            f"{label} store expected keys do not match the ordered jobs"
+        )
+
+
+def _mark_complete(store: object) -> None:
+    method = getattr(store, "mark_complete", None)
+    if callable(method):
+        method()
+
+
+def _judge_exception_detail(exc: BaseException) -> str:
+    detail = str(exc) or type(exc).__name__
+    return f"{type(exc).__name__}: {detail}"
 
 
 def validate_dpo_judge_object(
