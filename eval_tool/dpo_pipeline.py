@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import uuid
 from collections import Counter
@@ -284,7 +285,8 @@ def _run_locked(
             run_id=run_id,
         )
 
-    # 9. Only a fully published run may drop reproducible intermediate state.
+    # 9. Only a fully published run may drop superseded or reproducible state.
+    _collect_old_attempts(work_dir)
     if clean_partial:
         _clean_partial(work_dir, staging_dir)
 
@@ -723,6 +725,30 @@ def _failed_run(
             work_dir, run_id, audit_records, summary, warnings, error
         )
     return DpoPipelineError(f"{error}; diagnostics: {failed_dir}")
+
+
+def _collect_old_attempts(work_dir: Path) -> None:
+    """Drop attempts the active pointer no longer selects, after publication.
+
+    Resume only ever follows ``active.json``, so every other attempt is dead
+    state that would otherwise accumulate with each ``--overwrite`` rebuild.
+    Failures are ignored: this is disk hygiene, not part of the delivery.
+    """
+    for name in _PHASE_DIRS:
+        phase_dir = work_dir / name
+        attempts_dir = phase_dir / "attempts"
+        if not attempts_dir.is_dir():
+            continue
+        try:
+            active = json.loads(
+                (phase_dir / "active.json").read_text(encoding="utf-8")
+            )
+            keep = active["attempt_id"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for attempt in attempts_dir.iterdir():
+            if attempt.name != keep and attempt.is_dir():
+                shutil.rmtree(attempt, ignore_errors=True)
 
 
 def _clean_partial(work_dir: Path, staging_dir: Path) -> None:

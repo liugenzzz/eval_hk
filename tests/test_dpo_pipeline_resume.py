@@ -356,6 +356,23 @@ def test_overwrite_resets_inference_judge_raw_and_judge_parse_then_rebuilds(tmp_
     assert [row["rejected"] for row in rows] == ["重建:问题0", "重建:问题1"]
 
 
+def test_publication_collects_superseded_attempts_and_keeps_the_active_one(tmp_path):
+    source = alpaca_source(tmp_path, count=2)
+    config = make_config(tmp_path, source)
+    run_build_dpo(config, generator_factory=generator_factory(lambda text: f"生成:{text}"))
+
+    run_build_dpo(
+        config,
+        overwrite=True,
+        generator_factory=generator_factory(lambda text: f"重建:{text}"),
+    )
+
+    work = tmp_path / "work"
+    attempts = sorted(path.name for path in (work / "inference" / "attempts").iterdir())
+    assert attempts == [attempt_id(work, "inference")]
+    assert count_records(work, "inference") == 2
+
+
 def test_clean_partial_runs_only_after_success_and_keeps_delivery_artifacts(tmp_path):
     source = alpaca_source(tmp_path, count=2)
     config = make_config(tmp_path, source)
