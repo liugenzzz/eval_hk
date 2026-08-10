@@ -535,7 +535,9 @@ class StrictJsonlShardStore:
                 return parsed
             raise DpoCacheError(f"{path}:{line_number}: invalid JSON") from exc
         except (TypeError, ValueError) as exc:
-            raise DpoCacheError(f"{path}:{line_number}: invalid JSON record") from exc
+            raise DpoCacheError(
+                f"{path}:{line_number}: invalid JSON record: {exc}"
+            ) from exc
 
         self._validate_schema(record, path=path, line_number=line_number)
         _append_newline(path)
@@ -556,7 +558,9 @@ class StrictJsonlShardStore:
         except json.JSONDecodeError as exc:
             raise DpoCacheError(f"{path}:{line_number}: invalid JSON") from exc
         except (TypeError, ValueError) as exc:
-            raise DpoCacheError(f"{path}:{line_number}: invalid JSON record") from exc
+            raise DpoCacheError(
+                f"{path}:{line_number}: invalid JSON record: {exc}"
+            ) from exc
         self._validate_schema(record, path=path, line_number=line_number)
         return record
 
@@ -1289,11 +1293,21 @@ def _encode_json_line(value: Mapping[str, Any]) -> bytes:
 def _strict_json_object(text: str) -> dict[str, Any]:
     value = json.loads(
         text,
+        object_pairs_hook=_strict_object_pairs,
         parse_constant=_reject_json_constant,
         parse_float=_finite_float,
     )
     if not isinstance(value, dict):
         raise TypeError("JSONL record must be an object")
+    return value
+
+
+def _strict_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate JSON object key: {key}")
+        value[key] = item
     return value
 
 

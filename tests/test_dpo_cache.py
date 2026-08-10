@@ -107,6 +107,21 @@ def test_store_rejects_middle_corruption(tmp_path):
     assert shard.read_bytes().endswith(b"{bad}\n")
 
 
+def test_store_rejects_duplicate_json_object_keys(tmp_path):
+    from eval_tool.dpo_cache import DpoCacheError
+
+    store = _store(tmp_path, expected=("a",))
+    shard = store.shard_path(0)
+    shard.parent.mkdir(parents=True, exist_ok=True)
+    shard.write_text(
+        '{"sample_id":"a","sample_id":"a","value":"A"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(DpoCacheError, match="duplicate JSON object key"):
+        store.load()
+
+
 def test_store_rejects_duplicate_or_conflicting_keys_across_shards(tmp_path):
     from eval_tool.dpo_cache import DpoCacheError
 
