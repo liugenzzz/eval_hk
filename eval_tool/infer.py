@@ -37,6 +37,16 @@ class VLGenerator(Protocol):
         ...
 
 
+class MessageBatchGenerator(Protocol):
+    def generate_message_batch(
+        self,
+        messages_batch: list[list[dict[str, Any]]],
+        *,
+        enable_thinking: bool | None = None,
+    ) -> list[str]:
+        ...
+
+
 class PredictionMergeError(RuntimeError):
     """Prediction worker results cannot be merged into a complete ordered output."""
 
@@ -88,15 +98,50 @@ class QwenVLGenerator:
         image_b64s: list[str | list[str] | None] | None = None,
     ) -> list[str]:
         image_b64s = image_b64s or [None] * len(prompts)
-        images_per_sample = [_decode_images(cell) for cell in image_b64s]
-        texts = []
-        input_images = []
-        for prompt, images in zip(prompts, images_per_sample):
-            messages = build_chat_messages(prompt, images)
-            texts.append(self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
-            # Qwen's processor wants a single flat list of every image in the batch,
-            # matched to the <|image_pad|> placeholders in order — not a list per sample.
-            input_images.extend(images)
+        images_per_sample: list[list[Any]] = []
+        owned_images: list[Any] = []
+        try:
+            for cell in image_b64s:
+                images = _decode_images(cell)
+                images_per_sample.append(images)
+                owned_images.extend(images)
+            messages_batch = [
+                build_chat_messages(prompt, images)
+                for prompt, images in zip(prompts, images_per_sample)
+            ]
+            return self.generate_message_batch(
+                messages_batch, enable_thinking=None
+            )
+        finally:
+            for image in reversed(owned_images):
+                image.close()
+
+    def generate_message_batch(
+        self,
+        messages_batch: list[list[dict[str, Any]]],
+        *,
+        enable_thinking: bool | None = None,
+    ) -> list[str]:
+        texts: list[str] = []
+        input_images: list[Any] = []
+        for messages in messages_batch:
+            template_kwargs: dict[str, Any] = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            if enable_thinking is not None:
+                template_kwargs["enable_thinking"] = enable_thinking
+            texts.append(
+                self.processor.apply_chat_template(messages, **template_kwargs)
+            )
+            # Qwen expects one flat image list matching all message placeholders.
+            for message in messages:
+                content = message.get("content")
+                if not isinstance(content, (list, tuple)):
+                    continue
+                for part in content:
+                    if isinstance(part, Mapping) and part.get("type") == "image":
+                        input_images.append(part["image"])
         inputs_kwargs: dict[str, Any] = {"text": texts, "padding": True, "return_tensors": "pt"}
         if input_images:
             inputs_kwargs["images"] = input_images
@@ -263,13 +308,19 @@ def _decode_images(image_cell: str | list[str] | None) -> list[Any]:
 
     cells = image_cell if isinstance(image_cell, list) else decode_image_cell(image_cell)
     images = []
-    for raw in cells:
-        raw = str(raw)
-        if "," in raw and raw.strip().startswith("data:"):
-            raw = raw.split(",", 1)[1]
-        data = base64.b64decode(raw)
-        images.append(Image.open(io.BytesIO(data)).convert("RGB"))
-    return images
+    try:
+        for raw in cells:
+            raw = str(raw)
+            if "," in raw and raw.strip().startswith("data:"):
+                raw = raw.split(",", 1)[1]
+            data = base64.b64decode(raw)
+            with Image.open(io.BytesIO(data)) as source:
+                images.append(source.convert("RGB"))
+        return images
+    except Exception:
+        for image in reversed(images):
+            image.close()
+        raise
 
 
 def _message_content(prompt: str, images: list[Any]) -> list[dict[str, Any]]:
