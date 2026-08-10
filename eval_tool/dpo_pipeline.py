@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 
 from .dpo_cache import (
     DPO_NORMALIZER_VERSION,
@@ -170,13 +170,15 @@ def _run_locked(
 
     # 3. A dry run stops after image readability/MIME/hash validation.
     if dry_run:
+        summary = _dry_run_summary(config, inputs, units, runnable, preflight)
+        _print_dry_run(summary)
         return DpoRunResult(
             output_path=None,
             artifacts=MappingProxyType({}),
             selected_count=0,
             dry_run=True,
             failed_run_dir=None,
-            summary=_dry_run_summary(config, inputs, units, runnable, preflight),
+            summary=summary,
         )
 
     if not runnable:
@@ -630,6 +632,29 @@ def _manifest_data(
             "candidates": candidate_count,
         },
     }
+
+
+def _print_dry_run(summary: Mapping[str, Any]) -> None:
+    """Show the stats a dry run exists to produce; nothing else reports them."""
+    print("dry-run: no model was loaded, no Judge was called, nothing was published")
+    for item in summary["inputs"]:
+        print(
+            f"input       {item['source_path']} "
+            f"({item['container_format']}, {item['record_count']} records)"
+        )
+    print(f"candidates  {summary['normalized_candidates']} normalized")
+    print(f"pending     {summary['pending_candidates']} would run inference")
+    print(f"rejected    {summary['rejected_before_inference']} before inference")
+    for reason, count in summary["by_reason_code"].items():
+        print(f"  {reason:<26} {count}")
+    print("modality    of the pending candidates")
+    for modality, count in summary["by_modality"].items():
+        print(f"  {modality:<26} {count}")
+    images = summary["images"]
+    print(
+        f"images      {images['unique_readable']} unique readable, "
+        f"{images['visible_references']} visible references"
+    )
 
 
 def _dry_run_summary(

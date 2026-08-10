@@ -546,7 +546,7 @@ def test_dry_run_constructs_neither_generator_nor_judge(tmp_path):
     assert not (tmp_path / "out").exists() or not list((tmp_path / "out").glob("*.jsonl"))
 
 
-def test_dry_run_reports_normalization_dedupe_conflicts_and_images(tmp_path):
+def test_dry_run_reports_normalization_dedupe_conflicts_and_images(tmp_path, capsys):
     write_png(tmp_path / "images" / "a.png")
     source = write_json(
         tmp_path / "mixed.json",
@@ -585,6 +585,11 @@ def test_dry_run_reports_normalization_dedupe_conflicts_and_images(tmp_path):
     assert reasons["missing_image"] == 1
     assert summary["pending_candidates"] == 2
     assert summary["images"]["unique_readable"] == 1
+
+    printed = capsys.readouterr().out
+    assert "dry-run" in printed
+    assert "reference_conflict" in printed
+    assert str(source) in printed
 
 
 # ----------------------------------------------------------------------------
