@@ -19,6 +19,71 @@ python -m eval_tool all --config pipeline.json
 
 旧入口仍保留：`python -m eval_tool.run_infer --config infer_config.json`、`python -m eval_tool.run_eval --config config.json`，以及无子命令的 `python -m eval_tool --config config.json`。
 
+## 独立 JSON/JSONL → DPO 数据构建器
+
+`build-dpo` 是一条独立通路：直接读取 Alpaca/ShareGPT 的 JSON 或 JSONL，以原始标准答案为 `chosen`，让本地 Qwen/VLM 生成 `rejected`，最终发布严格 ShareGPT DPO JSONL。它不先转成 TSV/XLSX，也不改变上面的旧评估入口。
+
+复制并修改示例配置（示例密钥只是占位符，真实密钥不要提交到仓库）：
+
+```powershell
+Copy-Item dpo.example.json dpo.json
+python -m eval_tool build-dpo --config dpo.json
+```
+
+可混合传入多个文件；解析器按文件内容识别 JSON 数组、单个 JSON 对象或 JSONL，而不依赖扩展名。命令行重复的 `--input` 会整体替换配置里的 `inputs`，不会追加：
+
+```powershell
+python -m eval_tool build-dpo `
+  --config dpo.json `
+  --input data/alpaca_train.json `
+  --input data/sharegpt_train.jsonl
+```
+
+支持的全部命令行开关：
+
+- `--config PATH`：必填的严格 JSON 配置。
+- `--input PATH`：可重复；只要出现，就以这些输入替换配置中的 `inputs`。
+- `--dry-run`：完成加载、归一化、去重和图片读取/MIME/哈希预检，不加载生成模型，也不调用 Judge。
+- `--overwrite`：当输入、图片、模型、checkpoint 或生成身份变化时，创建并原子切换到新 attempt；旧 attempt 不会先被原地删除。
+- `--clean-partial`：仅在最终产物成功发布后清理可再生的中间缓存。
+
+Alpaca 多轮、多图示例；每个历史问答和当前问答都会各自展开为一条候选，当前轮只能看到此前标准历史：
+
+```json
+{
+  "history": [["<image>\n描述第一张图。", "第一张图的标准答案。"]],
+  "instruction": "<image>\n比较第二张图与第一张图。",
+  "input": "请只回答关键差异。",
+  "output": "当前轮标准答案。",
+  "images": ["images/first.png", "images/second.png"]
+}
+```
+
+ShareGPT 多轮、多图示例：
+
+```json
+{
+  "conversations": [
+    {"from": "human", "value": "<image>\n第一轮问题"},
+    {"from": "gpt", "value": "第一轮标准答案"},
+    {"from": "human", "value": "<image>\n第二轮问题"},
+    {"from": "gpt", "value": "第二轮标准答案"}
+  ],
+  "images": ["images/first.png", "images/second.png"]
+}
+```
+
+配置中的关键模式：
+
+- `wrong_only: false`：完全跳过 Judge，所有通过输入/图片校验且生成出非空、非相同答案的候选都可进入 DPO；此模式下 `rubric` 和 `judge` 即使残留也会被忽略。
+- `wrong_only: true`：必须设置 `rubric: "binary"` 或 `rubric: "v4"`，并提供完整 `judge`。只有 Judge 明确认定模型答错的候选会被选择；请求或解析失败不会被当作答错。
+- `infer.enable_thinking` 默认是 `false`。`model_path` 指向本地 HuggingFace 模型/checkpoint；`batch_size`、`gpu_ids`、dtype、device map 等影响生成身份，`workers_per_gpu` 仅影响调度和断点重分片。
+- `judge.api_key` 必须在本地配置中替换占位值，但不要把真实凭据提交到版本库。
+
+成功后，`output_dir` 中包含配置的训练文件名，以及 `audit_records.jsonl`、`rejected_records.jsonl`、`summary.json`、`warnings.log` 和最后发布的 `manifest.json`。训练行严格只有 `conversations`、`chosen`、`rejected`、`images`。`images` 保留输入中的原始路径字符串；解析后的绝对路径只用于内部读取和校验。
+
+断点状态位于 `work_dir`，推理、Judge 原始响应和 Judge 解析结果分层缓存。失败且最终选择数为零时，不覆盖已有成功产物，诊断写到 `work_dir/failed_runs/<run_id>/`。当前自动化验收使用离线 fake 生成器/Judge，未执行真实 GPU 模型与真实 Judge 服务冒烟；部署环境可在配置好私有服务后另行验证。
+
 > **评估装备描述开放问答(ShareGPT JSON 数据、只跑 vqa)请看《开放问答评估_使用说明.md》**,那是当前主用通路。本 README 描述的是原有 mcq/judge/vqa 三数据集流程,部分提示词/配置示例(P1-R3 能力分类等)不适用于开放问答通路。
 
 这是一个两段式 Python 命令行工具：

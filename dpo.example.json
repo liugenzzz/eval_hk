@@ -1,0 +1,32 @@
+{
+  "inputs": [
+    "data/alpaca_train.json",
+    "data/sharegpt_train.jsonl"
+  ],
+  "output_dir": "outputs/dpo",
+  "output_name": "train_dpo.jsonl",
+  "work_dir": "work/dpo",
+  "image_root": ".",
+  "wrong_only": true,
+  "rubric": "v4",
+  "infer": {
+    "model_name": "Qwen2.5-VL-7B-Instruct",
+    "model_path": "models/Qwen2.5-VL-7B-Instruct",
+    "enable_thinking": false,
+    "max_new_tokens": 1024,
+    "batch_size": 1,
+    "torch_dtype": "bfloat16",
+    "device_map": "auto",
+    "gpu_ids": [],
+    "workers_per_gpu": 1
+  },
+  "judge": {
+    "api_base": "http://127.0.0.1:8000/v1/chat/completions",
+    "api_key": "REPLACE_WITH_PRIVATE_JUDGE_KEY",
+    "model": "local-judge-model",
+    "temperature": 0.0,
+    "timeout": 120,
+    "max_retries": 3,
+    "max_workers": 8
+  }
+}

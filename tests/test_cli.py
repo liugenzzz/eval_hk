@@ -3,6 +3,7 @@ import json
 import pytest
 
 import run_rubric
+import eval_tool.cli as cli
 from eval_tool.cli import main
 
 
@@ -13,6 +14,7 @@ from eval_tool.cli import main
         (["infer", "--config", "pipeline.json", "--models", "base,sft"], "infer"),
         (["eval", "--config", "pipeline.json"], "eval"),
         (["all", "--config", "pipeline.json"], "all"),
+        (["build-dpo", "--config", "dpo.json"], "build-dpo"),
     ],
 )
 def test_cli_routes_subcommands(argv, handler, monkeypatch):
@@ -36,6 +38,114 @@ def test_no_subcommand_routes_to_legacy_eval(monkeypatch):
     main(["--config", "old.json"])
 
     assert calls == [["--config", "old.json"]]
+
+
+def test_build_dpo_routes_loaded_config_to_pipeline(monkeypatch, tmp_path):
+    loaded_config = object()
+    result = object()
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "load_dpo_config",
+        lambda path, **kwargs: calls.append(("load", path, kwargs)) or loaded_config,
+    )
+    monkeypatch.setattr(
+        cli,
+        "run_build_dpo",
+        lambda config, **kwargs: calls.append(("run", config, kwargs)) or result,
+    )
+    monkeypatch.setattr(cli.Path, "cwd", lambda: tmp_path)
+
+    actual = main(["build-dpo", "--config", "dpo.json"])
+
+    assert actual is result
+    assert calls == [
+        (
+            "load",
+            "dpo.json",
+            {"input_overrides": None, "invocation_dir": tmp_path},
+        ),
+        (
+            "run",
+            loaded_config,
+            {"dry_run": False, "overwrite": False, "clean_partial": False},
+        ),
+    ]
+
+
+def test_build_dpo_parser_collects_repeated_inputs_as_replacement(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        cli,
+        "load_dpo_config",
+        lambda path, **kwargs: calls.append(kwargs) or object(),
+    )
+    monkeypatch.setattr(cli, "run_build_dpo", lambda config, **kwargs: None)
+
+    main(
+        [
+            "build-dpo",
+            "--config",
+            "dpo.json",
+            "--input",
+            "first.json",
+            "--input",
+            "second.jsonl",
+        ]
+    )
+
+    assert calls[0]["input_overrides"] == ["first.json", "second.jsonl"]
+
+
+def test_build_dpo_parser_accepts_dry_run_overwrite_and_clean_partial(monkeypatch):
+    captured = []
+    monkeypatch.setattr(
+        "eval_tool.cli.HANDLERS",
+        {"build-dpo": lambda args: captured.append(args)},
+    )
+
+    main(
+        [
+            "build-dpo",
+            "--config",
+            "dpo.json",
+            "--dry-run",
+            "--overwrite",
+            "--clean-partial",
+        ]
+    )
+
+    assert captured[0].dry_run is True
+    assert captured[0].overwrite is True
+    assert captured[0].clean_partial is True
+
+
+def test_build_dpo_config_error_is_rendered_as_parser_error(monkeypatch, capsys):
+    from eval_tool.dpo_config import DpoConfigError
+
+    def fail_load(*args, **kwargs):
+        raise DpoConfigError("invalid DPO configuration")
+
+    monkeypatch.setattr(cli, "load_dpo_config", fail_load)
+
+    with pytest.raises(SystemExit, match="2"):
+        main(["build-dpo", "--config", "bad.json"])
+
+    assert "invalid DPO configuration" in capsys.readouterr().err
+
+
+def test_build_dpo_pipeline_error_is_rendered_as_parser_error(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "load_dpo_config", lambda *args, **kwargs: object())
+
+    def fail_run(*args, **kwargs):
+        raise cli.DpoPipelineError("DPO pipeline failed")
+
+    monkeypatch.setattr(cli, "run_build_dpo", fail_run)
+
+    with pytest.raises(SystemExit, match="2"):
+        main(["build-dpo", "--config", "dpo.json"])
+
+    assert "DPO pipeline failed" in capsys.readouterr().err
 
 
 def test_infer_parser_splits_models_and_reads_safety_flags(monkeypatch):
@@ -284,7 +394,9 @@ def test_run_rubric_shim_calls_new_cli(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("command", ["convert", "infer", "eval", "sweep", "all"])
+@pytest.mark.parametrize(
+    "command", ["convert", "infer", "eval", "sweep", "all", "build-dpo"]
+)
 def test_each_subcommand_has_help(command):
     with pytest.raises(SystemExit) as exc_info:
         main([command, "--help"])
@@ -300,3 +412,21 @@ def test_top_level_help_lists_unified_subcommands(capsys):
     output = capsys.readouterr().out
     for command in ("convert", "infer", "eval", "sweep", "all"):
         assert command in output
+
+
+def test_build_dpo_help_is_available(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["build-dpo", "--help"])
+
+    assert exc_info.value.code == 0
+    output = capsys.readouterr().out
+    for flag in ("--config", "--input", "--dry-run", "--overwrite", "--clean-partial"):
+        assert flag in output
+
+
+def test_top_level_help_lists_build_dpo(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--help"])
+
+    assert exc_info.value.code == 0
+    assert "build-dpo" in capsys.readouterr().out

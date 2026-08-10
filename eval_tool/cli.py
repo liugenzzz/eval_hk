@@ -15,6 +15,8 @@ from .config import (
     load_infer_config,
     load_pipeline_config,
 )
+from .dpo_config import load_dpo_config
+from .dpo_pipeline import DpoPipelineError, run_build_dpo
 from .pipeline import (
     PipelineError,
     run_all,
@@ -28,7 +30,7 @@ from .run_eval import run as run_eval_stage
 from .run_infer import run as run_infer_stage
 
 
-SUBCOMMANDS = {"convert", "infer", "eval", "sweep", "all"}
+SUBCOMMANDS = {"convert", "infer", "eval", "sweep", "all", "build-dpo"}
 
 
 def _model_names(value: str) -> list[str]:
@@ -84,6 +86,20 @@ def build_parser() -> argparse.ArgumentParser:
     all_command.add_argument("--overwrite", action="store_true")
     all_command.add_argument("--clean-partial", action="store_true")
     all_command.add_argument("--rubric")
+
+    build_dpo = subparsers.add_parser(
+        "build-dpo", help="Build a DPO dataset directly from JSON/JSONL"
+    )
+    build_dpo.add_argument("--config", required=True)
+    build_dpo.add_argument(
+        "--input",
+        dest="inputs",
+        action="append",
+        help="Replace the configured inputs; repeat for several files",
+    )
+    build_dpo.add_argument("--dry-run", action="store_true")
+    build_dpo.add_argument("--overwrite", action="store_true")
+    build_dpo.add_argument("--clean-partial", action="store_true")
     return parser
 
 
@@ -201,12 +217,27 @@ def _handle_all(args: argparse.Namespace) -> Any:
     )
 
 
+def _handle_build_dpo(args: argparse.Namespace) -> Any:
+    config = load_dpo_config(
+        args.config,
+        input_overrides=args.inputs,
+        invocation_dir=Path.cwd(),
+    )
+    return run_build_dpo(
+        config,
+        dry_run=args.dry_run,
+        overwrite=args.overwrite,
+        clean_partial=args.clean_partial,
+    )
+
+
 HANDLERS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "convert": _handle_convert,
     "infer": _handle_infer,
     "eval": _handle_eval,
     "sweep": _handle_sweep,
     "all": _handle_all,
+    "build-dpo": _handle_build_dpo,
 }
 
 
@@ -220,5 +251,7 @@ def main(argv: list[str] | None = None) -> Any:
     args = parser.parse_args(arguments)
     try:
         return HANDLERS[args.command](args)
-    except (ConfigError, PipelineError, RubricError) as exc:
+    # DpoConfigError derives from ConfigError, so config and pipeline failures in
+    # the DPO builder render through the same parser error path as every command.
+    except (ConfigError, DpoPipelineError, PipelineError, RubricError) as exc:
         parser.error(str(exc))
