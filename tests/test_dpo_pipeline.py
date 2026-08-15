@@ -234,10 +234,19 @@ def test_full_mode_never_constructs_or_calls_judge(tmp_path, capsys):
     assert result.selected_count == 1
     assert result.dry_run is False
     assert result.failed_run_dir is None
-    assert "judge" in capsys.readouterr().out.casefold()
+    printed = capsys.readouterr().out
+    assert "judge" in printed.casefold()
+    assert "读取并校验输入" in printed
+    assert "加载推理缓存" in printed
+    assert "写入训练文件" in printed
+    assert "校验暂存产物" in printed
+    assert "发布最终产物" in printed
     rows = read_jsonl(Path(result.output_path))
-    assert rows[0]["rejected"] == "模型回答:问题一"
-    assert rows[0]["chosen"] == "参考一"
+    assert rows[0]["rejected"] == {
+        "from": "gpt",
+        "value": "模型回答:问题一",
+    }
+    assert rows[0]["chosen"] == {"from": "gpt", "value": "参考一"}
 
 
 def test_fake_mixed_input_pipeline_publishes_reconciled_strict_artifacts(tmp_path):
@@ -333,8 +342,8 @@ def test_short_valid_answers_are_not_length_filtered(tmp_path):
     assert rows == [
         {
             "conversations": [{"from": "human", "value": "一?"}],
-            "chosen": "是",
-            "rejected": "否",
+            "chosen": {"from": "gpt", "value": "是"},
+            "rejected": {"from": "gpt", "value": "否"},
             "images": [],
         }
     ]
@@ -363,8 +372,18 @@ def test_output_follows_input_turn_order_not_completion_order(tmp_path):
     result = run_build_dpo(config, generator_factory=generator_factory(respond))
 
     rows = read_jsonl(Path(result.output_path))
-    assert [row["chosen"] for row in rows] == ["第一答", "第二答", "第三答"]
-    assert [row["rejected"] for row in rows] == ["回答A", "回答B", "回答C"]
+    assert [row["chosen"]["value"] for row in rows] == [
+        "第一答",
+        "第二答",
+        "第三答",
+    ]
+    assert [row["rejected"]["value"] for row in rows] == [
+        "回答A",
+        "回答B",
+        "回答C",
+    ]
+    assert all(row["chosen"]["from"] == "gpt" for row in rows)
+    assert all(row["rejected"]["from"] == "gpt" for row in rows)
 
 
 # ----------------------------------------------------------------------------
@@ -433,7 +452,7 @@ def test_wrong_only_binary_keeps_all_and_only_correct_false(tmp_path):
     )
 
     rows = read_jsonl(Path(result.output_path))
-    assert [row["chosen"] for row in rows] == ["参考一"]
+    assert [row["chosen"]["value"] for row in rows] == ["参考一"]
     audits = read_jsonl(artifacts_of(result)["audit_records.jsonl"])
     passed = [item for item in audits if item["reason_code"] == "judge_pass"]
     assert len(passed) == 1
@@ -464,7 +483,7 @@ def test_wrong_only_v4_keeps_all_and_only_hit_zero(tmp_path):
     )
 
     rows = read_jsonl(Path(result.output_path))
-    assert [row["chosen"] for row in rows] == ["参考一"]
+    assert [row["chosen"]["value"] for row in rows] == ["参考一"]
     audits = read_jsonl(artifacts_of(result)["audit_records.jsonl"])
     selected = [item for item in audits if item["disposition"] == "selected"]
     assert selected[0]["judge"]["hit"] == 0

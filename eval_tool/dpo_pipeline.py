@@ -143,11 +143,13 @@ def _run_locked(
 
     # 1. Recover an interrupted publication and refuse to touch an output set
     #    that no longer matches its own manifest, before any model work.
+    print("[DPO] 检查已有输出与中断事务...", flush=True)
     with _translate("existing DPO output"):
         recover_incomplete_publication(output_dir, output_name=config.output_name)
         verify_committed_artifacts(output_dir, output_name=config.output_name)
 
     # 2. Normalize every input into candidates plus complete rejections.
+    print("[DPO] 读取并校验输入、去重及图片...", flush=True)
     with _translate("DPO input"):
         inputs = normalize_inputs(config.inputs, image_root=config.image_root)
         dedupe = deduplicate_candidates(inputs.candidates)
@@ -193,6 +195,7 @@ def _run_locked(
         )
 
     # 4. Run only the candidates that are still missing from the inference cache.
+    print(f"[DPO] 加载推理缓存（候选样本 {len(runnable)}）...", flush=True)
     with _translate("DPO model identity"):
         checkpoint = checkpoint_identity(config.infer.model_path)
         inference_fp = build_dpo_inference_fp(
@@ -267,6 +270,7 @@ def _run_locked(
     )
     staging_dir = work_dir / "staging" / run_id
     with _translate("DPO artifact publication"):
+        print(f"[DPO] 写入训练文件（选中样本 {len(training_rows)}）...", flush=True)
         staged = stage_dpo_artifacts(
             training_rows,
             audit_records,
@@ -276,7 +280,9 @@ def _run_locked(
             output_name=config.output_name,
             staging_dir=staging_dir,
         )
+        print("[DPO] 校验暂存产物...", flush=True)
         stats = validate_staged_artifacts(staged, output_name=config.output_name)
+        print("[DPO] 发布最终产物...", flush=True)
         published = publish_staged_artifacts(
             staged,
             stats,
@@ -284,6 +290,7 @@ def _run_locked(
             output_name=config.output_name,
             run_id=run_id,
         )
+        print(f"[DPO] 构建完成：{published[config.output_name]}", flush=True)
 
     # 9. Only a fully published run may drop superseded or reproducible state.
     _collect_old_attempts(work_dir)
@@ -509,8 +516,8 @@ def _training_row(candidate: DpoCandidate, prediction: str) -> dict[str, Any]:
             {"from": turn.from_, "value": turn.value}
             for turn in candidate.conversations
         ],
-        "chosen": candidate.chosen,
-        "rejected": prediction,
+        "chosen": {"from": "gpt", "value": candidate.chosen},
+        "rejected": {"from": "gpt", "value": prediction},
         "images": [ref.original for ref in candidate.images],
     }
 

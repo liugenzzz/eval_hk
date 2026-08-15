@@ -76,8 +76,8 @@ def _audit(
 def _row(*, rejected: str = "wrong answer") -> dict[str, object]:
     return {
         "conversations": [{"from": "human", "value": "question"}],
-        "chosen": "reference answer",
-        "rejected": rejected,
+        "chosen": {"from": "gpt", "value": "reference answer"},
+        "rejected": {"from": "gpt", "value": rejected},
         "images": ["relative/image.png"],
     }
 
@@ -157,6 +157,15 @@ def test_training_rows_have_exactly_conversations_chosen_rejected_images(
             output_name="training.jsonl",
             staging_dir=tmp_path / "invalid",
         )
+
+
+@pytest.mark.parametrize("field", ["chosen", "rejected"])
+def test_training_rows_reject_legacy_string_preference_answers(field: str) -> None:
+    row = _row()
+    row[field] = "legacy string answer"
+
+    with pytest.raises(DpoReportError, match="ShareGPT assistant message"):
+        dpo_report._validate_training_row(row)
 
 
 def test_invalid_valid_json_record_appears_in_audit_and_rejected(
@@ -291,6 +300,29 @@ def test_manifest_records_sha256_byte_count_and_line_count(tmp_path: Path) -> No
     assert manifest["artifacts"]["training.jsonl"]["line_count"] == 1
 
 
+def test_staging_collects_artifact_stats_while_writing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_post_write_scan(*args: object, **kwargs: object) -> ArtifactStat:
+        raise AssertionError("staging must not rescan artifacts it just wrote")
+
+    monkeypatch.setattr(dpo_report, "compute_artifact_stat", reject_post_write_scan)
+    audit = [_audit()]
+
+    staged = stage_dpo_artifacts(
+        [_row()],
+        audit,
+        build_summary(audit),
+        [],
+        _manifest_data(),
+        output_name="training.jsonl",
+        staging_dir=tmp_path / "stage",
+    )
+
+    manifest = json.loads(staged["manifest.json"].read_text(encoding="utf-8"))
+    assert manifest["artifacts"]["training.jsonl"]["line_count"] == 1
+
+
 def test_manifest_and_warnings_recursively_redact_api_keys(tmp_path: Path) -> None:
     fake_secret = "FAKE_TEST_SECRET_DO_NOT_USE"
     manifest_data = _manifest_data()
@@ -401,6 +433,54 @@ def test_warnings_log_is_always_published(tmp_path: Path) -> None:
     )
     assert published["warnings.log"].is_file()
     assert published["warnings.log"].read_bytes() == b""
+
+
+def test_publish_does_not_reparse_already_validated_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, stats = _stage(tmp_path / "stage")
+
+    def reject_duplicate_validation(*args: object, **kwargs: object):
+        raise AssertionError("publish must verify the copy, not reparse staging")
+
+    monkeypatch.setattr(
+        dpo_report, "validate_staged_artifacts", reject_duplicate_validation
+    )
+
+    published = publish_staged_artifacts(
+        staged,
+        stats,
+        output_dir=tmp_path / "output",
+        output_name="training.jsonl",
+        run_id="single-validation",
+    )
+
+    assert published["training.jsonl"].is_file()
+
+
+def test_publish_full_verification_runs_before_but_not_after_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staged, stats = _stage(tmp_path / "stage")
+    real_verify = dpo_report.verify_committed_artifacts
+    calls = 0
+
+    def counting_verify(*args: object, **kwargs: object):
+        nonlocal calls
+        calls += 1
+        return real_verify(*args, **kwargs)
+
+    monkeypatch.setattr(dpo_report, "verify_committed_artifacts", counting_verify)
+
+    publish_staged_artifacts(
+        staged,
+        stats,
+        output_dir=tmp_path / "output",
+        output_name="training.jsonl",
+        run_id="single-committed-verification",
+    )
+
+    assert calls == 1
 
 
 def test_manifest_is_replaced_last(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -633,3 +713,22 @@ def test_compute_artifact_stat_rejects_incomplete_jsonl_line(tmp_path: Path) -> 
     path.write_text('{"ok":true}', encoding="utf-8")
     with pytest.raises(DpoReportError, match="newline"):
         compute_artifact_stat(path, jsonl=True)
+
+
+def test_compute_artifact_stat_streams_jsonl_without_read_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "records.jsonl"
+    path.write_text('{"ok":true}\n{"ok":false}\n', encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def reject_whole_file_read(candidate: Path) -> bytes:
+        if candidate == path:
+            raise AssertionError("JSONL validation must stream")
+        return real_read_bytes(candidate)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_file_read)
+
+    stat = compute_artifact_stat(path, jsonl=True)
+
+    assert stat.line_count == 2

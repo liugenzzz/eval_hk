@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import eval_tool.dpo_infer as dpo_infer
 from eval_tool.dpo_cache import DpoInferenceStore
 from eval_tool.dpo_config import DpoInferConfig
 from eval_tool.dpo_infer import (
@@ -149,6 +150,52 @@ class _SpawnGenerator:
 
 def _spawn_generator_factory(config):
     return _SpawnGenerator()
+
+
+def test_worker_completion_updates_and_closes_parent_progress(monkeypatch):
+    events: list[tuple[str, object]] = []
+
+    class FakeProgress:
+        def __init__(self, **kwargs):
+            events.append(("open", kwargs))
+
+        def update(self, amount):
+            events.append(("update", amount))
+
+        def close(self):
+            events.append(("close", None))
+
+    class FakeQueue:
+        def __init__(self):
+            self.messages = [
+                ("progress", 0, 1, None),
+                ("done", 0, None, None),
+            ]
+
+        def get(self, timeout):
+            return self.messages.pop(0)
+
+    class FakeEvent:
+        def is_set(self):
+            return False
+
+    class FakeProcess:
+        exitcode = None
+
+    monkeypatch.setattr(dpo_infer, "tqdm", FakeProgress, raising=False)
+
+    dpo_infer._wait_for_worker_completion(
+        [FakeProcess()], FakeQueue(), FakeEvent(), total_batches=1
+    )
+
+    assert events == [
+        (
+            "open",
+            {"total": 1, "desc": "VLM\u63a8\u7406", "unit": "batch"},
+        ),
+        ("update", 1),
+        ("close", None),
+    ]
 
 
 def test_model_receives_gold_history_and_current_human_only():
@@ -354,6 +401,44 @@ def test_resume_with_changed_workers_per_gpu_runs_only_pending_samples(tmp_path)
     ]
     assert generated == ["q1", "q2"]
     assert outcomes["sample-0"].prediction == "already cached"
+    assert list(outcomes) == ["sample-0", "sample-1", "sample-2"]
+
+
+def test_completed_inference_cache_is_scanned_only_once(tmp_path, monkeypatch):
+    candidates = [_candidate(f"sample-{index}", f"q{index}") for index in range(3)]
+    store = _store(tmp_path, candidates)
+    store.append_batch(
+        [
+            {
+                "sample_id": candidate.sample_id,
+                "status": "ok",
+                "prediction": f"cached:{candidate.sample_id}",
+                "error_type": None,
+                "error_message": None,
+            }
+            for candidate in candidates
+        ]
+    )
+    store.sync()
+    real_load = store.load
+    load_calls = 0
+
+    def counting_load():
+        nonlocal load_calls
+        load_calls += 1
+        return real_load()
+
+    monkeypatch.setattr(store, "load", counting_load)
+
+    outcomes = run_dpo_inference(
+        candidates,
+        {},
+        _config(tmp_path),
+        store,
+        generator_factory=lambda config: pytest.fail("completed cache reran inference"),
+    )
+
+    assert load_calls == 1
     assert list(outcomes) == ["sample-0", "sample-1", "sample-2"]
 
 

@@ -8,7 +8,7 @@ import re
 import uuid
 from dataclasses import dataclass, fields, is_dataclass
 from pathlib import Path, PurePath
-from typing import Any, BinaryIO, Callable, Literal, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterator, Literal, Mapping, Sequence
 
 from .dpo_config import DpoInferConfig, RubricName
 from .dpo_input import DpoCandidate, InputSummary
@@ -374,19 +374,39 @@ class StrictJsonlShardStore:
         if errors:
             raise DpoCacheError("could not sync and close a DPO phase writer") from errors[0]
 
-    def mark_complete(self) -> None:
+    def mark_complete(
+        self,
+        *,
+        snapshot: Mapping[tuple[str, ...], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.sync()
-        loaded = self.load()
+        loaded = self.load() if snapshot is None else snapshot
+        unknown = set(loaded).difference(self._expected_key_set)
+        if unknown:
+            raise DpoCacheError(
+                f"cannot complete DPO phase with {len(unknown)} unknown records"
+            )
         missing = [key for key in self.expected_keys if key not in loaded]
         if missing:
             raise DpoCacheError(
                 f"cannot complete DPO phase with {len(missing)} missing records"
             )
+        for line_number, key in enumerate(self.expected_keys, start=1):
+            record = loaded[key]
+            if not isinstance(record, Mapping):
+                raise DpoCacheError(
+                    f"completion snapshot record {line_number} must be an object"
+                )
+            actual = self._record_key(record, path=None, line_number=line_number)
+            if actual != key:
+                raise DpoCacheError(
+                    f"completion snapshot key {key!r} does not match record {actual!r}"
+                )
         payload = {
             **self._attempt.as_json(),
-            "record_count": len(loaded),
+            "record_count": len(self.expected_keys),
             "record_key_digest": canonical_sha256(
-                [list(key) for key in loaded]
+                [list(key) for key in self.expected_keys]
             ),
         }
         _atomic_write_json(self.complete_path, payload)
@@ -499,40 +519,50 @@ class StrictJsonlShardStore:
                 shards.append((int(match.group(1)), path))
         return [path for _, path in sorted(shards)]
 
-    def _load_shard(self, path: Path) -> list[tuple[int, dict[str, Any]]]:
-        try:
-            data = path.read_bytes()
-        except (OSError, RuntimeError, ValueError) as exc:
-            raise DpoCacheError(f"cannot read DPO cache shard: {path}") from exc
-        last_newline = data.rfind(b"\n")
-        complete = data[: last_newline + 1]
-        tail = data[last_newline + 1 :]
-        parsed: list[tuple[int, dict[str, Any]]] = []
+    def _load_shard(self, path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         line_number = 0
+        byte_offset = 0
+        tail: bytes | None = None
+        tail_offset = 0
+        try:
+            with path.open("rb") as stream:
+                while True:
+                    raw_line = stream.readline()
+                    if not raw_line:
+                        break
+                    line_number += 1
+                    line_offset = byte_offset
+                    byte_offset += len(raw_line)
+                    if raw_line.endswith(b"\n"):
+                        yield (
+                            line_number,
+                            self._parse_record_bytes(
+                                raw_line[:-1], path, line_number
+                            ),
+                        )
+                        continue
+                    tail = raw_line
+                    tail_offset = line_offset
+                    break
+        except OSError as exc:
+            raise DpoCacheError(f"cannot read DPO cache shard: {path}") from exc
 
-        for raw_line in complete.splitlines():
-            line_number += 1
-            parsed.append(
-                (line_number, self._parse_record_bytes(raw_line, path, line_number))
-            )
-
-        if not tail:
-            return parsed
-        line_number += 1
+        if tail is None:
+            return
         try:
             text = tail.decode("utf-8")
         except UnicodeDecodeError as exc:
             if exc.reason == "unexpected end of data" and exc.end == len(tail):
-                self._truncate_tail(path, last_newline + 1, line_number)
-                return parsed
+                self._truncate_tail(path, tail_offset, line_number)
+                return
             raise DpoCacheError(f"{path}:{line_number}: invalid UTF-8") from exc
 
         try:
             record = _strict_json_object(text)
         except json.JSONDecodeError as exc:
             if _is_truncated_json(text, exc):
-                self._truncate_tail(path, last_newline + 1, line_number)
-                return parsed
+                self._truncate_tail(path, tail_offset, line_number)
+                return
             raise DpoCacheError(f"{path}:{line_number}: invalid JSON") from exc
         except (TypeError, ValueError) as exc:
             raise DpoCacheError(
@@ -541,8 +571,7 @@ class StrictJsonlShardStore:
 
         self._validate_schema(record, path=path, line_number=line_number)
         _append_newline(path)
-        parsed.append((line_number, record))
-        return parsed
+        yield line_number, record
 
     def _parse_record_bytes(
         self, raw_line: bytes, path: Path, line_number: int

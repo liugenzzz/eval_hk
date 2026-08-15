@@ -6,7 +6,7 @@ import os
 import re
 import shutil
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, is_dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
@@ -79,6 +79,64 @@ class AuditRecord:
     detail: str
 
 
+class _SummaryAccumulator:
+    def __init__(self) -> None:
+        self.by_input_file: Counter[str] = Counter()
+        self.by_source_format: Counter[str] = Counter(
+            {"alpaca": 0, "sharegpt": 0, "invalid": 0}
+        )
+        self.by_modality: Counter[str] = Counter(
+            {"text": 0, "single_image": 0, "multi_image": 0, "invalid": 0}
+        )
+        self.by_turn_shape: Counter[str] = Counter(
+            {"single_turn": 0, "multi_turn": 0, "invalid": 0}
+        )
+        self.by_disposition: Counter[str] = Counter(
+            {"selected": 0, "rejected": 0}
+        )
+        self.by_reason_code: Counter[str] = Counter()
+        self.total = 0
+
+    def add(self, record: AuditRecord) -> None:
+        source_path = record.source.get("source_path", record.source.get("path"))
+        self.by_input_file[
+            str(source_path) if source_path is not None else "<unknown>"
+        ] += 1
+        self.by_source_format[record.source_format or "invalid"] += 1
+        self.by_modality[record.modality or "invalid"] += 1
+        if record.turn_count is None:
+            turn_shape = "invalid"
+        elif record.turn_count <= 1:
+            turn_shape = "single_turn"
+        else:
+            turn_shape = "multi_turn"
+        self.by_turn_shape[turn_shape] += 1
+        self.by_disposition[record.disposition] += 1
+        if record.reason_code is not None:
+            self.by_reason_code[record.reason_code] += 1
+        self.total += 1
+
+    def build(self) -> dict[str, Any]:
+        selected = self.by_disposition["selected"]
+        rejected = self.by_disposition["rejected"]
+        return {
+            "total": self.total,
+            "selected": selected,
+            "rejected": rejected,
+            "totals": {
+                "records": self.total,
+                "selected": selected,
+                "rejected": rejected,
+            },
+            "by_input_file": _sorted_counts(self.by_input_file),
+            "by_source_format": _sorted_counts(self.by_source_format),
+            "by_modality": _sorted_counts(self.by_modality),
+            "by_turn_shape": _sorted_counts(self.by_turn_shape),
+            "by_disposition": _sorted_counts(self.by_disposition),
+            "by_reason_code": _sorted_counts(self.by_reason_code),
+        }
+
+
 def redact_config(value: Any) -> Any:
     """Return a JSON-compatible copy with credentials and data URLs removed."""
     if is_dataclass(value) and not isinstance(value, type):
@@ -108,6 +166,8 @@ def redact_config(value: Any) -> Any:
 def compute_artifact_stat(path: Path, *, jsonl: bool) -> ArtifactStat:
     """Hash an artifact and, for JSONL, strictly validate/count its records."""
     candidate = Path(path)
+    if jsonl:
+        return _scan_jsonl(candidate)
     digest = hashlib.sha256()
     byte_count = 0
     try:
@@ -115,66 +175,21 @@ def compute_artifact_stat(path: Path, *, jsonl: bool) -> ArtifactStat:
             while chunk := stream.read(1024 * 1024):
                 digest.update(chunk)
                 byte_count += len(chunk)
-        line_count = _validate_jsonl_bytes(candidate.read_bytes()) if jsonl else None
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
+    except OSError as exc:
         raise DpoReportError(f"invalid artifact {candidate}: {exc}") from exc
     return ArtifactStat(
         sha256=digest.hexdigest(),
         byte_count=byte_count,
-        line_count=line_count,
+        line_count=None,
     )
 
 
-def build_summary(audit_records: Sequence[AuditRecord]) -> dict[str, Any]:
+def build_summary(audit_records: Iterable[AuditRecord]) -> dict[str, Any]:
     """Build reconciliable audit aggregates using stable bucket names."""
-    by_input_file: Counter[str] = Counter()
-    by_source_format: Counter[str] = Counter(
-        {"alpaca": 0, "sharegpt": 0, "invalid": 0}
-    )
-    by_modality: Counter[str] = Counter(
-        {"text": 0, "single_image": 0, "multi_image": 0, "invalid": 0}
-    )
-    by_turn_shape: Counter[str] = Counter(
-        {"single_turn": 0, "multi_turn": 0, "invalid": 0}
-    )
-    by_disposition: Counter[str] = Counter({"selected": 0, "rejected": 0})
-    by_reason_code: Counter[str] = Counter()
-
+    accumulator = _SummaryAccumulator()
     for record in audit_records:
-        source_path = record.source.get("source_path", record.source.get("path"))
-        by_input_file[str(source_path) if source_path is not None else "<unknown>"] += 1
-        by_source_format[record.source_format or "invalid"] += 1
-        by_modality[record.modality or "invalid"] += 1
-        if record.turn_count is None:
-            turn_shape = "invalid"
-        elif record.turn_count <= 1:
-            turn_shape = "single_turn"
-        else:
-            turn_shape = "multi_turn"
-        by_turn_shape[turn_shape] += 1
-        by_disposition[record.disposition] += 1
-        if record.reason_code is not None:
-            by_reason_code[record.reason_code] += 1
-
-    total = len(audit_records)
-    selected = by_disposition["selected"]
-    rejected = by_disposition["rejected"]
-    return {
-        "total": total,
-        "selected": selected,
-        "rejected": rejected,
-        "totals": {
-            "records": total,
-            "selected": selected,
-            "rejected": rejected,
-        },
-        "by_input_file": _sorted_counts(by_input_file),
-        "by_source_format": _sorted_counts(by_source_format),
-        "by_modality": _sorted_counts(by_modality),
-        "by_turn_shape": _sorted_counts(by_turn_shape),
-        "by_disposition": _sorted_counts(by_disposition),
-        "by_reason_code": _sorted_counts(by_reason_code),
-    }
+        accumulator.add(record)
+    return accumulator.build()
 
 
 def stage_dpo_artifacts(
@@ -198,34 +213,40 @@ def stage_dpo_artifacts(
     names = _artifact_names(output_name)
     staged = {name: _safe_child(stage, name) for name in names}
 
-    strict_rows = [_validate_training_row(row) for row in training_rows]
-    audit_values = [_audit_to_json(record) for record in audit_records]
-    rejected_values = [
-        value
-        for record, value in zip(audit_records, audit_values, strict=True)
-        if record.disposition == "rejected"
-    ]
     safe_summary = _json_compatible(summary)
     if not isinstance(safe_summary, dict):
         raise DpoReportError("summary must be a JSON object")
-    _validate_summary(safe_summary, audit_records)
     safe_warnings = [_redact_text(str(item)) for item in warnings]
 
-    _write_jsonl(staged[output_name], strict_rows)
-    _write_jsonl(staged["audit_records.jsonl"], audit_values)
-    _write_jsonl(staged["rejected_records.jsonl"], rejected_values)
-    _write_json(staged["summary.json"], safe_summary)
-    _write_text(
+    training_stat = _write_jsonl(
+        staged[output_name],
+        (_validate_training_row(row) for row in training_rows),
+    )
+    audit_stat = _write_jsonl(
+        staged["audit_records.jsonl"],
+        (_audit_to_json(record) for record in audit_records),
+    )
+    rejected_stat = _write_jsonl(
+        staged["rejected_records.jsonl"],
+        (
+            _audit_to_json(record)
+            for record in audit_records
+            if record.disposition == "rejected"
+        ),
+    )
+    _validate_summary(safe_summary, audit_records)
+    summary_stat = _write_json(staged["summary.json"], safe_summary)
+    warnings_stat = _write_text(
         staged["warnings.log"],
         "".join(f"{warning}\n" for warning in safe_warnings),
     )
 
     non_manifest_stats = {
-        name: compute_artifact_stat(
-            staged[name], jsonl=name == output_name or name in _JSONL_FIXED_NAMES
-        )
-        for name in names
-        if name != "manifest.json"
+        output_name: training_stat,
+        "audit_records.jsonl": audit_stat,
+        "rejected_records.jsonl": rejected_stat,
+        "summary.json": summary_stat,
+        "warnings.log": warnings_stat,
     }
     safe_manifest_data = redact_config(manifest_data)
     if not isinstance(safe_manifest_data, dict):
@@ -238,8 +259,10 @@ def stage_dpo_artifacts(
     counts.update(
         {
             "audit": len(audit_records),
-            "selected": len(strict_rows),
-            "rejected": len(rejected_values),
+            "selected": len(training_rows),
+            "rejected": sum(
+                record.disposition == "rejected" for record in audit_records
+            ),
         }
     )
     manifest.update(
@@ -273,19 +296,13 @@ def validate_staged_artifacts(
         if path.name != name or not path.is_file():
             raise DpoReportError(f"missing or unsafe staged artifact: {name}")
 
-    stats = {
-        name: compute_artifact_stat(
-            paths[name], jsonl=name == output_name or name in _JSONL_FIXED_NAMES
-        )
-        for name in names
-    }
+    stats = _validate_artifact_contents(paths, output_name=output_name)
     manifest = _read_json(paths["manifest.json"])
     _validate_manifest(
         manifest,
         output_name=output_name,
         actual_stats=stats,
     )
-    _validate_artifact_contents(paths, output_name=output_name)
     _assert_no_sensitive_values(manifest, context="manifest.json")
     _assert_no_unredacted_warning(paths["warnings.log"])
     return stats
@@ -378,10 +395,12 @@ def publish_staged_artifacts(
     recover_incomplete_publication(output, output_name=output_name)
     verify_committed_artifacts(output, output_name=output_name)
 
-    # Revalidate the caller's staging claim before creating a transaction.
-    current_stats = validate_staged_artifacts(staged, output_name=output_name)
-    if dict(stats) != current_stats:
-        raise DpoReportError("staged artifacts changed after validation")
+    staged_manifest = _read_json(Path(staged["manifest.json"]))
+    _validate_manifest(
+        staged_manifest,
+        output_name=output_name,
+        actual_stats=stats,
+    )
 
     journal_root = _safe_child(output, ".dpo_publish")
     journal_root.mkdir(parents=True, exist_ok=True)
@@ -447,7 +466,7 @@ def publish_staged_artifacts(
             journal["replaced"].append(name)
             _write_journal(transaction, journal)
 
-        committed = verify_committed_artifacts(output, output_name=output_name)
+        committed = _read_json(destinations["manifest.json"])
         if committed != expected_manifest:
             raise DpoReportError("published manifest differs from the staged manifest")
         journal["state"] = "committed"
@@ -491,21 +510,35 @@ def verify_committed_artifacts(
         return None
 
     manifest = _read_json(manifest_path)
-    actual_stats: dict[str, ArtifactStat] = {}
     for name in names:
         path = paths[name]
         if not path.is_file():
             raise DpoReportError(f"committed artifact is missing: {name}")
-        if name != "manifest.json":
-            actual_stats[name] = compute_artifact_stat(
-                path, jsonl=name == output_name or name in _JSONL_FIXED_NAMES
+    try:
+        actual_stats = _validate_artifact_contents(paths, output_name=output_name)
+    except DpoReportError as content_error:
+        # Preserve the public contract that byte/stat tampering is reported as
+        # a manifest mismatch first.  The slower fallback only runs for an
+        # already-invalid committed set, never on the normal large-data path.
+        fallback_stats = {
+            name: compute_artifact_stat(
+                paths[name],
+                jsonl=name == output_name or name in _JSONL_FIXED_NAMES,
             )
+            for name in names
+            if name != "manifest.json"
+        }
+        _validate_manifest(
+            manifest,
+            output_name=output_name,
+            actual_stats=fallback_stats,
+        )
+        raise content_error
     _validate_manifest(
         manifest,
         output_name=output_name,
         actual_stats=actual_stats,
     )
-    _validate_artifact_contents(paths, output_name=output_name)
     _assert_no_sensitive_values(manifest, context="manifest.json")
     _assert_no_unredacted_warning(paths["warnings.log"])
     return manifest
@@ -701,27 +734,62 @@ def _validate_summary(
 
 def _validate_artifact_contents(
     paths: Mapping[str, Path], *, output_name: str
-) -> None:
-    training_rows = _read_jsonl(paths[output_name])
-    for row in training_rows:
-        _validate_training_row(row)
-    audit_values = _read_jsonl(paths["audit_records.jsonl"])
-    audits = [_audit_from_json(value) for value in audit_values]
-    rejected_values = _read_jsonl(paths["rejected_records.jsonl"])
-    expected_rejected = [
-        value
-        for value, record in zip(audit_values, audits, strict=True)
-        if record.disposition == "rejected"
-    ]
-    if rejected_values != expected_rejected:
+) -> dict[str, ArtifactStat]:
+    training_count = 0
+
+    def validate_training(value: dict[str, Any], line_number: int) -> None:
+        nonlocal training_count
+        _validate_training_row(value)
+        training_count += 1
+
+    training_stat = _scan_jsonl(paths[output_name], validate_training)
+
+    summary_accumulator = _SummaryAccumulator()
+    selected_count = 0
+    expected_rejected_digest = hashlib.sha256()
+    expected_rejected_bytes = 0
+    expected_rejected_count = 0
+
+    def validate_audit(value: dict[str, Any], line_number: int) -> None:
+        nonlocal selected_count, expected_rejected_bytes, expected_rejected_count
+        record = _audit_from_json(value)
+        summary_accumulator.add(record)
+        if record.disposition == "selected":
+            selected_count += 1
+            return
+        payload = f"{_json_dumps(value)}\n".encode("utf-8")
+        expected_rejected_digest.update(payload)
+        expected_rejected_bytes += len(payload)
+        expected_rejected_count += 1
+
+    audit_stat = _scan_jsonl(paths["audit_records.jsonl"], validate_audit)
+    rejected_stat = _scan_jsonl(paths["rejected_records.jsonl"])
+    expected_rejected_stat = ArtifactStat(
+        sha256=expected_rejected_digest.hexdigest(),
+        byte_count=expected_rejected_bytes,
+        line_count=expected_rejected_count,
+    )
+    if rejected_stat != expected_rejected_stat:
         raise DpoReportError("rejected_records.jsonl does not match rejected audit records")
-    selected_count = sum(record.disposition == "selected" for record in audits)
-    if len(training_rows) != selected_count:
+    if training_count != selected_count:
         raise DpoReportError("training row count does not match selected audit records")
     summary = _read_json(paths["summary.json"])
     if not isinstance(summary, dict):
         raise DpoReportError("summary.json must contain a JSON object")
-    _validate_summary(summary, audits)
+    expected_summary = summary_accumulator.build()
+    for key, expected_value in expected_summary.items():
+        if summary.get(key) != expected_value:
+            raise DpoReportError(
+                f"summary aggregate does not match audit records: {key}"
+            )
+    return {
+        output_name: training_stat,
+        "audit_records.jsonl": audit_stat,
+        "rejected_records.jsonl": rejected_stat,
+        "summary.json": compute_artifact_stat(paths["summary.json"], jsonl=False),
+        "warnings.log": compute_artifact_stat(paths["warnings.log"], jsonl=False),
+        "manifest.json": compute_artifact_stat(paths["manifest.json"], jsonl=False),
+    }
 
 
 def _validate_training_row(row: Mapping[str, Any]) -> dict[str, Any]:
@@ -743,8 +811,17 @@ def _validate_training_row(row: Mapping[str, Any]) -> dict[str, Any]:
             or not isinstance(turn["value"], str)
         ):
             raise DpoReportError("training conversations contain an invalid turn")
-    if not isinstance(value["chosen"], str) or not isinstance(value["rejected"], str):
-        raise DpoReportError("training chosen and rejected values must be strings")
+    for field in ("chosen", "rejected"):
+        message = value[field]
+        if (
+            not isinstance(message, dict)
+            or set(message) != {"from", "value"}
+            or message["from"] != "gpt"
+            or not isinstance(message["value"], str)
+        ):
+            raise DpoReportError(
+                f"training {field} must be a ShareGPT assistant message"
+            )
     if not isinstance(value["images"], list) or not all(
         isinstance(item, str) for item in value["images"]
     ):
@@ -770,21 +847,43 @@ def _json_dumps(value: Any, *, indent: int | None = None) -> str:
         raise DpoReportError(f"value is not strict JSON: {exc}") from exc
 
 
-def _write_jsonl(path: Path, values: Sequence[Mapping[str, Any]]) -> None:
-    _write_text(path, "".join(f"{_json_dumps(value)}\n" for value in values))
+def _write_jsonl(
+    path: Path, values: Iterable[Mapping[str, Any]]
+) -> ArtifactStat:
+    digest = hashlib.sha256()
+    byte_count = 0
+    line_count = 0
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("wb") as stream:
+            for value in values:
+                payload = f"{_json_dumps(value)}\n".encode("utf-8")
+                stream.write(payload)
+                digest.update(payload)
+                byte_count += len(payload)
+                line_count += 1
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as exc:
+        raise DpoReportError(f"cannot write JSONL artifact {path}: {exc}") from exc
+    return ArtifactStat(digest.hexdigest(), byte_count, line_count)
 
 
-def _write_json(path: Path, value: Any) -> None:
-    _write_text(path, _json_dumps(value, indent=2) + "\n")
+def _write_json(path: Path, value: Any) -> ArtifactStat:
+    return _write_text(path, _json_dumps(value, indent=2) + "\n")
 
 
-def _write_text(path: Path, text: str) -> None:
+def _write_text(path: Path, text: str) -> ArtifactStat:
     data = text.encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as stream:
-        stream.write(data)
-        stream.flush()
-        os.fsync(stream.fileno())
+    try:
+        with path.open("wb") as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError as exc:
+        raise DpoReportError(f"cannot write artifact {path}: {exc}") from exc
+    return ArtifactStat(hashlib.sha256(data).hexdigest(), len(data), None)
 
 
 def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -815,28 +914,35 @@ def _read_json(path: Path) -> Any:
         raise DpoReportError(f"invalid JSON artifact {path}: {exc}") from exc
 
 
-def _read_jsonl(path: Path) -> list[Any]:
+def _scan_jsonl(
+    path: Path,
+    on_value: Callable[[dict[str, Any], int], None] | None = None,
+) -> ArtifactStat:
+    candidate = Path(path)
+    digest = hashlib.sha256()
+    byte_count = 0
+    line_count = 0
     try:
-        data = path.read_bytes()
-        _validate_jsonl_bytes(data)
-        return [_strict_loads(line.decode("utf-8")) for line in data.splitlines()]
+        with candidate.open("rb") as stream:
+            while raw_line := stream.readline():
+                line_count += 1
+                digest.update(raw_line)
+                byte_count += len(raw_line)
+                if not raw_line.endswith(b"\n"):
+                    raise ValueError("JSONL must end with a newline")
+                payload = raw_line[:-1]
+                if not payload.strip():
+                    raise ValueError(f"blank JSONL line {line_count}")
+                value = _strict_loads(payload.decode("utf-8"))
+                if not isinstance(value, dict):
+                    raise ValueError(f"JSONL line {line_count} is not an object")
+                if on_value is not None:
+                    on_value(value, line_count)
+    except DpoReportError:
+        raise
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
-        raise DpoReportError(f"invalid JSONL artifact {path}: {exc}") from exc
-
-
-def _validate_jsonl_bytes(data: bytes) -> int:
-    if not data:
-        return 0
-    if not data.endswith(b"\n"):
-        raise ValueError("JSONL must end with a newline")
-    lines = data.splitlines()
-    for index, line in enumerate(lines, start=1):
-        if not line:
-            raise ValueError(f"blank JSONL line {index}")
-        value = _strict_loads(line.decode("utf-8"))
-        if not isinstance(value, dict):
-            raise ValueError(f"JSONL line {index} is not an object")
-    return len(lines)
+        raise DpoReportError(f"invalid artifact {candidate}: {exc}") from exc
+    return ArtifactStat(digest.hexdigest(), byte_count, line_count)
 
 
 def _stat_to_json(stat: ArtifactStat) -> dict[str, Any]:

@@ -320,7 +320,11 @@ def test_input_model_generation_image_or_checkpoint_change_requires_overwrite(tm
         generator_factory=generator_factory(lambda text: f"重建:{text}"),
     )
     rows = read_jsonl(Path(result.output_path))
-    assert [row["rejected"] for row in rows] == ["重建:问题0", "重建:问题1", "重建:问题2"]
+    assert [row["rejected"]["value"] for row in rows] == [
+        "重建:问题0",
+        "重建:问题1",
+        "重建:问题2",
+    ]
 
 
 def test_overwrite_resets_inference_judge_raw_and_judge_parse_then_rebuilds(tmp_path):
@@ -353,7 +357,10 @@ def test_overwrite_resets_inference_judge_raw_and_judge_parse_then_rebuilds(tmp_
     assert len(generated) == 2
     assert len(judged) == 2
     rows = read_jsonl(Path(result.output_path))
-    assert [row["rejected"] for row in rows] == ["重建:问题0", "重建:问题1"]
+    assert [row["rejected"]["value"] for row in rows] == [
+        "重建:问题0",
+        "重建:问题1",
+    ]
 
 
 def test_publication_collects_superseded_attempts_and_keeps_the_active_one(tmp_path):

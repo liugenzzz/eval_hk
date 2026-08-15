@@ -57,6 +57,25 @@ def test_store_loads_all_worker_shards_and_orders_by_expected_ids(tmp_path):
     assert loaded[("c",)]["value"] == "C"
 
 
+def test_store_streams_shards_without_reading_each_file_into_one_bytes_object(
+    tmp_path, monkeypatch
+):
+    store = _store(tmp_path, expected=("a", "b"))
+    store.append_batch([_record("a"), _record("b")])
+    store.sync()
+    shard = store.shard_path(0)
+    real_read_bytes = Path.read_bytes
+
+    def reject_whole_shard_read(path):
+        if path == shard:
+            raise AssertionError("cache shard must be parsed as a stream")
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_whole_shard_read)
+
+    assert list(store.load()) == [("a",), ("b",)]
+
+
 def test_store_resumes_only_missing_sample_ids(tmp_path):
     store = _store(tmp_path)
     store.append_batch([_record("b")], worker_id=1)
@@ -300,6 +319,18 @@ def test_attempt_state_recovers_at_each_active_pointer_and_complete_marker_crash
     reopened.mark_complete()
     assert reopened.is_complete()
     assert _store(tmp_path, expected=("a",)).attempt_id == store.attempt_id
+
+
+def test_completion_snapshot_digest_uses_expected_key_order(tmp_path):
+    store = _store(tmp_path, expected=("a", "b"))
+    store.append_batch([_record("a"), _record("b")])
+    store.sync()
+    loaded = store.load()
+    reversed_snapshot = dict(reversed(tuple(loaded.items())))
+
+    store.mark_complete(snapshot=reversed_snapshot)
+
+    assert store.is_complete()
 
 
 def _identity_fixture(tmp_path):

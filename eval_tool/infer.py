@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import io
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Protocol
@@ -30,6 +31,31 @@ DEFAULT_INFER_PROMPTS = {
         "题目：{question}"
     ),
 }
+
+_PROCESSOR_KWARGS_WARNING = (
+    "Kwargs passed to `processor.__call__` have to be in `processor_kwargs` "
+    "dict, not in `**kwargs`"
+)
+_PROCESSOR_KWARGS_FILTER_MARKER = "_eval_tool_processor_kwargs_filter"
+
+
+class _ProcessorKwargsWarningFilter(logging.Filter):
+    _eval_tool_processor_kwargs_filter = True
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.getMessage() != _PROCESSOR_KWARGS_WARNING
+
+
+def _install_processor_kwargs_warning_filter() -> None:
+    """Hide one noisy Transformers compatibility message, and nothing else."""
+
+    logger = logging.getLogger("transformers.processing_utils")
+    if any(
+        getattr(item, _PROCESSOR_KWARGS_FILTER_MARKER, False)
+        for item in logger.filters
+    ):
+        return
+    logger.addFilter(_ProcessorKwargsWarningFilter())
 
 
 class VLGenerator(Protocol):
@@ -70,6 +96,7 @@ class QwenVLGenerator:
             raise RuntimeError(
                 "Qwen-VL inference requires transformers and torch. Install the matching Qwen-VL environment first."
             ) from exc
+        _install_processor_kwargs_warning_filter()
         model_cls = (
             getattr(transformers, "AutoModelForImageTextToText", None)
             or getattr(transformers, "Qwen2_5_VLForConditionalGeneration", None)

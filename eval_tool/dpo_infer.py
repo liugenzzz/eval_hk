@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from tqdm import tqdm
+
 from .dpo_cache import DpoInferenceStore
 from .dpo_config import DpoInferConfig
 from .dpo_input import DpoCandidate, DpoTurn, ImageRef, SourceRef
@@ -214,8 +216,12 @@ def run_dpo_inference(
 
     ordered = tuple(candidates)
     _validate_candidates(ordered)
-    cached = store.load()
-    pending_ids = set(store.pending_sample_ids())
+    loaded = store.load()
+    pending_ids = {
+        candidate.sample_id
+        for candidate in ordered
+        if (candidate.sample_id,) not in loaded
+    }
     pending = tuple(
         candidate for candidate in ordered if candidate.sample_id in pending_ids
     )
@@ -242,9 +248,9 @@ def run_dpo_inference(
                 store,
                 generator_factory=generator_factory,
             )
+        loaded = store.load()
 
-    store.mark_complete()
-    loaded = store.load()
+    store.mark_complete(snapshot=loaded)
     outcomes = _inference_records(loaded)
     missing = [candidate.sample_id for candidate in ordered if candidate.sample_id not in outcomes]
     if missing:
@@ -337,6 +343,7 @@ def _run_parallel_inference(
         )
         for worker_id in range(worker_count)
     ]
+    total_batches = sum(len(launch.batches) for launch in launches)
 
     context = multiprocessing.get_context("spawn")
     status_queue = context.Queue()
@@ -356,7 +363,9 @@ def _run_parallel_inference(
             process.start()
         _wait_for_worker_readiness(processes, status_queue, fatal_event)
         start_event.set()
-        _wait_for_worker_completion(processes, status_queue, fatal_event)
+        _wait_for_worker_completion(
+            processes, status_queue, fatal_event, total_batches=total_batches
+        )
         for process in processes:
             process.join(timeout=5)
             if process.is_alive():
@@ -401,9 +410,41 @@ def _wait_for_worker_readiness(processes, status_queue, fatal_event) -> None:
         )
 
 
-def _wait_for_worker_completion(processes, status_queue, fatal_event) -> None:
+def _wait_for_worker_completion(
+    processes,
+    status_queue,
+    fatal_event,
+    *,
+    total_batches: int,
+) -> None:
+    if type(total_batches) is not int or total_batches < 0:
+        raise DpoInferenceFatalError(
+            "total inference batches must be a non-negative integer"
+        )
+    pbar = tqdm(total=total_batches, desc="VLM\u63a8\u7406", unit="batch")
+    try:
+        _wait_for_worker_completion_messages(
+            processes,
+            status_queue,
+            fatal_event,
+            total_batches=total_batches,
+            pbar=pbar,
+        )
+    finally:
+        pbar.close()
+
+
+def _wait_for_worker_completion_messages(
+    processes,
+    status_queue,
+    fatal_event,
+    *,
+    total_batches: int,
+    pbar,
+) -> None:
     done: set[int] = set()
     peer_stopped: set[int] = set()
+    completed_batches = 0
     while len(done) + len(peer_stopped) < len(processes):
         message = _next_worker_message(
             processes,
@@ -412,6 +453,22 @@ def _wait_for_worker_completion(processes, status_queue, fatal_event) -> None:
             known_exits=done | peer_stopped,
         )
         kind, worker_id, error_type, detail = message
+        if kind == "progress":
+            if worker_id in done or worker_id in peer_stopped:
+                raise DpoInferenceFatalError(
+                    f"inference worker {worker_id} reported progress after exit"
+                )
+            if type(error_type) is not int or error_type < 1 or detail is not None:
+                raise DpoInferenceFatalError(
+                    f"inference worker {worker_id} sent invalid progress"
+                )
+            completed_batches += error_type
+            if completed_batches > total_batches:
+                raise DpoInferenceFatalError(
+                    "inference workers reported more batches than scheduled"
+                )
+            pbar.update(error_type)
+            continue
         if kind == "done":
             if worker_id in done or worker_id in peer_stopped:
                 raise DpoInferenceFatalError(
@@ -432,6 +489,10 @@ def _wait_for_worker_completion(processes, status_queue, fatal_event) -> None:
         raise DpoInferenceFatalError(
             "inference workers stopped because a fatal peer did not report its failure"
         )
+    if completed_batches != total_batches:
+        raise DpoInferenceFatalError(
+            "inference workers exited before reporting every completed batch"
+        )
 
 
 def _next_worker_message(
@@ -440,7 +501,7 @@ def _next_worker_message(
     fatal_event,
     *,
     known_exits: set[int] | None = None,
-) -> tuple[str, int, str | None, str | None]:
+) -> tuple[str, int, int | str | None, str | None]:
     known = known_exits or set()
     while True:
         try:
@@ -463,7 +524,8 @@ def _next_worker_message(
         if (
             not isinstance(message, tuple)
             or len(message) != 4
-            or message[0] not in {"ready", "done", "fatal", "peer_stopped"}
+            or message[0]
+            not in {"ready", "done", "fatal", "peer_stopped", "progress"}
             or type(message[1]) is not int
         ):
             raise DpoInferenceFatalError("inference worker sent an invalid status")
@@ -537,6 +599,7 @@ def _dpo_inference_worker_entry(
                 append=append,
                 assets=assets,
             )
+            status_queue.put(("progress", launch.worker_id, 1, None))
         terminal = ("done", launch.worker_id, None, None)
     except _PeerFatalStop:
         terminal = ("peer_stopped", launch.worker_id, None, None)
