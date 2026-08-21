@@ -1,7 +1,10 @@
 import base64
+import builtins
 import io
+import sys
 from contextlib import nullcontext
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -10,6 +13,7 @@ from PIL import Image
 
 from eval_tool.config import InferConfig
 from eval_tool.infer import QwenVLGenerator, generate_predictions
+from eval_tool.imaging import IMAGE_PREPROCESS_PROFILE
 from eval_tool.run_infer import run
 
 
@@ -66,6 +70,8 @@ class FakeQwenProcessor:
         self.template_calls = []
         self.processor_calls = []
         self.image_pixels = []
+        self.image_sizes = []
+        self.image_modes = []
         self.decode_calls = []
 
     def apply_chat_template(self, messages, **kwargs):
@@ -74,9 +80,12 @@ class FakeQwenProcessor:
 
     def __call__(self, **kwargs):
         self.processor_calls.append(dict(kwargs))
+        images = kwargs.get("images", [])
         self.image_pixels.append(
-            [image.getpixel((0, 0)) for image in kwargs.get("images", [])]
+            [image.getpixel((0, 0)) for image in images]
         )
+        self.image_sizes.append([image.size for image in images])
+        self.image_modes.append([image.mode for image in images])
         if self.error is not None:
             raise self.error
         return FakeModelInputs(len(kwargs["text"]))
@@ -104,22 +113,90 @@ class FakeTorch:
         return nullcontext()
 
 
+class ImmediateFuture:
+    def __init__(self, function, args):
+        try:
+            self.value = function(*args)
+            self.error = None
+        except Exception as exc:
+            self.value = None
+            self.error = exc
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+class ImmediateExecutor:
+    def __init__(self, max_workers):
+        self.max_workers = max_workers
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return None
+
+    def submit(self, function, *args):
+        return ImmediateFuture(function, args)
+
+
 def _qwen_generator(*, decoded=None, processor_error=None):
     generator = object.__new__(QwenVLGenerator)
     generator.model_path = Path("unused")
     generator.max_new_tokens = 17
     generator.torch_dtype = "auto"
     generator.device_map = "auto"
+    generator.image_min_pixels = None
+    generator.image_max_pixels = None
     generator.processor = FakeQwenProcessor(decoded=decoded, error=processor_error)
     generator.model = FakeQwenModel()
     generator._torch = FakeTorch()
     return generator
 
 
-def _png_base64(color):
+def _png_base64(color, *, size=(1, 1), mode="RGB"):
     buffer = io.BytesIO()
-    Image.new("RGB", (1, 1), color).save(buffer, format="PNG")
+    with Image.new(mode, size, color) as image:
+        image.save(buffer, format="PNG")
     return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _mock_qwen_dependencies(
+    monkeypatch, checkpoint_size=None, *, image_processor=None
+):
+    processor_calls = []
+    model_calls = []
+
+    class FakeAutoProcessor:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            processor_calls.append((args, dict(kwargs)))
+            return SimpleNamespace(
+                image_processor=(
+                    image_processor
+                    if image_processor is not None
+                    else SimpleNamespace(size=checkpoint_size)
+                )
+            )
+
+    class FakeModelLoader:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            model_calls.append((args, dict(kwargs)))
+            return SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(
+            AutoProcessor=FakeAutoProcessor,
+            AutoModelForImageTextToText=FakeModelLoader,
+        ),
+    )
+    return processor_calls, model_calls
 
 
 def test_qwen_message_batch_flattens_images_in_sample_message_content_order():
@@ -236,6 +313,8 @@ def test_legacy_generate_batch_preserves_image_order_omits_thinking_and_closes_i
     assert generator.processor.image_pixels == [
         [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
     ]
+    assert generator.processor.image_sizes == [[(1, 1), (1, 1), (1, 1)]]
+    assert generator.processor.image_modes == [["RGB", "RGB", "RGB"]]
     assert all(
         "enable_thinking" not in kwargs
         for _, kwargs in generator.processor.template_calls
@@ -246,19 +325,148 @@ def test_legacy_generate_batch_preserves_image_order_omits_thinking_and_closes_i
             image.getpixel((0, 0))
 
 
+def test_legacy_generate_batch_applies_configured_llamafactory_image_bounds():
+    generator = _qwen_generator(decoded=[" answer "])
+    generator.image_min_pixels = 65_536
+    generator.image_max_pixels = 589_824
+    payload = _png_base64(
+        (11, 22, 33, 128), size=(1000, 1000), mode="RGBA"
+    )
+
+    assert generator.generate_batch(["question"], [payload]) == ["answer"]
+
+    assert generator.processor.image_sizes == [[(768, 768)]]
+    assert generator.processor.image_modes == [["RGB"]]
+    owned_image = generator.processor.processor_calls[0]["images"][0]
+    with pytest.raises(ValueError):
+        owned_image.getpixel((0, 0))
+
+
 def test_legacy_generate_batch_closes_owned_images_when_processor_raises():
     generator = _qwen_generator(
         decoded=["unused"], processor_error=RuntimeError("processor failed")
     )
-    payload = _png_base64((11, 22, 33))
+    generator.image_min_pixels = 65_536
+    generator.image_max_pixels = 589_824
+    payload = _png_base64(
+        (11, 22, 33, 128), size=(1000, 1000), mode="RGBA"
+    )
 
     with pytest.raises(RuntimeError, match="processor failed"):
         generator.generate_batch(["question"], [payload])
 
     owned_images = generator.processor.processor_calls[0]["images"]
     assert len(owned_images) == 1
+    assert generator.processor.image_sizes == [[(768, 768)]]
+    assert generator.processor.image_modes == [["RGB"]]
     with pytest.raises(ValueError):
         owned_images[0].getpixel((0, 0))
+
+
+def test_qwen_generator_validates_pixel_pair_before_model_import(
+    tmp_path, monkeypatch
+):
+    real_import = builtins.__import__
+    attempted_model_imports = []
+
+    def guarded_import(name, *args, **kwargs):
+        if name in {"torch", "transformers"}:
+            attempted_model_imports.append(name)
+            raise AssertionError(f"unexpected model import: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(ValueError, match="provided together"):
+        QwenVLGenerator(
+            model_path=tmp_path / "model",
+            image_min_pixels=65_536,
+        )
+
+    assert attempted_model_imports == []
+
+
+def test_qwen_generator_keeps_processor_load_kwargs_and_logs_active_profile(
+    tmp_path, monkeypatch, capsys
+):
+    checkpoint_size = {"shortest_edge": 56, "longest_edge": 1_003_520}
+    processor_calls, model_calls = _mock_qwen_dependencies(
+        monkeypatch, checkpoint_size
+    )
+
+    QwenVLGenerator(
+        model_path=tmp_path / "model",
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    assert processor_calls == [
+        ((str(tmp_path / "model"),), {"trust_remote_code": True})
+    ]
+    assert len(model_calls) == 1
+    output = capsys.readouterr().out
+    assert IMAGE_PREPROCESS_PROFILE in output
+    assert "min_pixels=65536" in output
+    assert "max_pixels=589824" in output
+    assert f"checkpoint_size={checkpoint_size}" in output
+
+
+def test_qwen_generator_checkpoint_size_logging_is_best_effort(
+    tmp_path, monkeypatch, capsys
+):
+    class ThrowingImageProcessor:
+        @property
+        def size(self):
+            raise RuntimeError("size unavailable")
+
+    _, model_calls = _mock_qwen_dependencies(
+        monkeypatch,
+        image_processor=ThrowingImageProcessor(),
+    )
+
+    QwenVLGenerator(
+        model_path=tmp_path / "model",
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    assert len(model_calls) == 1
+    assert "checkpoint_size=<unavailable>" in capsys.readouterr().out
+
+
+def test_qwen_generator_profile_logging_failure_does_not_block_model_load(
+    tmp_path, monkeypatch
+):
+    _, model_calls = _mock_qwen_dependencies(
+        monkeypatch,
+        {"shortest_edge": 56, "longest_edge": 1_003_520},
+    )
+
+    def failing_print(*args, **kwargs):
+        raise BrokenPipeError("stdout is closed")
+
+    monkeypatch.setattr(builtins, "print", failing_print)
+
+    QwenVLGenerator(
+        model_path=tmp_path / "model",
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    assert len(model_calls) == 1
+
+
+def test_qwen_generator_without_pixel_profile_does_not_log_image_profile(
+    tmp_path, monkeypatch, capsys
+):
+    processor_calls, _ = _mock_qwen_dependencies(monkeypatch, {"edge": 28})
+
+    QwenVLGenerator(model_path=tmp_path / "model")
+
+    assert processor_calls == [
+        ((str(tmp_path / "model"),), {"trust_remote_code": True})
+    ]
+    assert capsys.readouterr().out == ""
 
 
 def test_generate_predictions_rejects_short_batch():
@@ -390,6 +598,97 @@ def test_run_infer_uses_batch_generation_when_available(tmp_path):
     ]
     output = pd.read_excel(out_dir / "base_aero_vqa.xlsx", dtype={"index": str})
     assert output["prediction"].tolist() == ["pred-0", "pred-1", "pred-0"]
+
+
+def test_run_infer_passes_image_bounds_to_sequential_qwen_generator(
+    tmp_path, monkeypatch
+):
+    tsv_dir = tmp_path / "tsv"
+    tsv_dir.mkdir()
+    out_dir = tmp_path / "pred"
+    pd.DataFrame(
+        [{"index": "1", "image": "", "question": "q1", "answer": "a1"}]
+    ).to_csv(tsv_dir / "aero_vqa.tsv", sep="\t", index=False)
+    constructed = []
+
+    def construct_generator(**kwargs):
+        constructed.append(kwargs)
+        return FakeBatchGenerator()
+
+    monkeypatch.setattr("eval_tool.run_infer.QwenVLGenerator", construct_generator)
+
+    run(
+        InferConfig(
+            model_name="base",
+            model_path=tmp_path / "model",
+            tsv_dir=tsv_dir,
+            out_dir=out_dir,
+            datasets={"vqa": "aero_vqa"},
+            prompt_files={},
+            image_min_pixels=65_536,
+            image_max_pixels=589_824,
+        )
+    )
+
+    assert constructed == [
+        {
+            "model_path": tmp_path / "model",
+            "max_new_tokens": 512,
+            "torch_dtype": "auto",
+            "device_map": "auto",
+            "image_min_pixels": 65_536,
+            "image_max_pixels": 589_824,
+        }
+    ]
+
+
+def test_run_infer_passes_image_bounds_through_parallel_worker(
+    tmp_path, monkeypatch
+):
+    tsv_dir = tmp_path / "tsv"
+    tsv_dir.mkdir()
+    out_dir = tmp_path / "pred"
+    pd.DataFrame(
+        [{"index": "1", "image": "", "question": "q1", "answer": "a1"}]
+    ).to_csv(tsv_dir / "aero_vqa.tsv", sep="\t", index=False)
+    constructed = []
+
+    def construct_generator(**kwargs):
+        constructed.append(kwargs)
+        return FakeBatchGenerator()
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before-test")
+    monkeypatch.setattr("eval_tool.run_infer.QwenVLGenerator", construct_generator)
+    monkeypatch.setattr("eval_tool.run_infer.ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr("eval_tool.run_infer.as_completed", lambda futures: futures)
+    monkeypatch.setattr(
+        "eval_tool.run_infer._progress", lambda iterable, **kwargs: iterable
+    )
+
+    run(
+        InferConfig(
+            model_name="base",
+            model_path=tmp_path / "model",
+            tsv_dir=tsv_dir,
+            out_dir=out_dir,
+            datasets={"vqa": "aero_vqa"},
+            prompt_files={},
+            gpu_ids=[3],
+            image_min_pixels=65_536,
+            image_max_pixels=589_824,
+        )
+    )
+
+    assert constructed == [
+        {
+            "model_path": tmp_path / "model",
+            "max_new_tokens": 512,
+            "torch_dtype": "auto",
+            "device_map": "auto",
+            "image_min_pixels": 65_536,
+            "image_max_pixels": 589_824,
+        }
+    ]
 
 
 def test_run_infer_uses_parallel_branch_without_creating_main_generator(tmp_path, monkeypatch):

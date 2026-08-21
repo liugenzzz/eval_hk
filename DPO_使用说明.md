@@ -127,6 +127,8 @@ Copy-Item dpo.example.json dpo.json
     "model_path": "models/Qwen2.5-VL-7B-Instruct",
     "enable_thinking": false,
     "max_new_tokens": 1024,
+    "image_min_pixels": 65536,
+    "image_max_pixels": 589824,
     "batch_size": 1,
     "torch_dtype": "bfloat16",
     "device_map": "auto",
@@ -171,6 +173,8 @@ Copy-Item dpo.example.json dpo.json
 | `model_path` | 无 | 已存在的本地模型/checkpoint 路径，必填。 |
 | `enable_thinking` | `false` | 是否把思考模式传给模型聊天模板。 |
 | `max_new_tokens` | `1024` | 单条答案最大生成 token 数，至少为 1。 |
+| `image_min_pixels` | `null` | 本地模型图片的总像素面积下界；必须与 `image_max_pixels` 成对设置为正整数。 |
+| `image_max_pixels` | `null` | 本地模型图片的总像素面积上界；必须满足 `image_min_pixels <= image_max_pixels`。 |
 | `batch_size` | `1` | 每批推理样本数，至少为 1；显存不足时优先调小。 |
 | `torch_dtype` | `"auto"` | 例如 `auto`、`bfloat16`、`float16`。 |
 | `device_map` | `"auto"` | Transformers 模型加载设备映射。 |
@@ -178,6 +182,10 @@ Copy-Item dpo.example.json dpo.json
 | `workers_per_gpu` | `1` | 每张 GPU 的 worker 数，至少为 1。 |
 
 设置 `gpu_ids` 时，每个 worker 会通过 `CUDA_VISIBLE_DEVICES` 绑定到一张物理卡；`device_map` 应使用 `auto` 或 worker 内的 `cuda:0`，不要写其他 CUDA 编号。
+
+示例 `65536/589824` 与当前 LLaMAFactory `0.9.5.dev0` 训练配置一致。本地生成模型会在 checkpoint processor 前按 `llamafactory-0.9.5-qwen-static-v1` 预缩放；checkpoint processor 仍继续处理，Judge 使用的原始图片字节不受影响。两项省略或同时为 `null` 时维持旧行为。降低 max 可减少视觉 token/显存但可能丢细节，提高 min 会放大小图。
+
+像素设置和 profile 会写入 manifest，并在启用时加入 inference fingerprint。改值后应使用 `python -m eval_tool build-dpo --config dpo.json --overwrite` 创建新 attempt，或改用新的 `work_dir`，不能直接复用旧断点。要与训练逐像素一致，还需保证源图字节、Pillow/Transformers 版本及 checkpoint processor 配置相同。
 
 ### 4.3 Judge 字段
 

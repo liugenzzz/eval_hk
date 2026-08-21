@@ -10,7 +10,12 @@ from typing import Any, Callable, Iterable, Mapping, Protocol
 import pandas as pd
 
 from .history import parse_history_cell
-from .imaging import decode_image_cell
+from .imaging import (
+    IMAGE_PREPROCESS_PROFILE,
+    decode_image_cell,
+    prepare_llamafactory_qwen_image,
+    validate_image_pixel_bounds,
+)
 from .prompting import PromptTemplate, load_prompt_text
 
 
@@ -87,8 +92,14 @@ class QwenVLGenerator:
     max_new_tokens: int = 512
     torch_dtype: str = "auto"
     device_map: str = "auto"
+    image_min_pixels: int | None = None
+    image_max_pixels: int | None = None
 
     def __post_init__(self) -> None:
+        self.image_min_pixels, self.image_max_pixels = validate_image_pixel_bounds(
+            self.image_min_pixels,
+            self.image_max_pixels,
+        )
         try:
             import torch
             import transformers
@@ -109,6 +120,23 @@ class QwenVLGenerator:
             )
         self._torch = torch
         self.processor = transformers.AutoProcessor.from_pretrained(str(self.model_path), trust_remote_code=True)
+        if self.image_min_pixels is not None:
+            try:
+                image_processor = getattr(self.processor, "image_processor", None)
+                checkpoint_size = str(getattr(image_processor, "size", None))
+            except Exception:
+                checkpoint_size = "<unavailable>"
+            try:
+                print(
+                    "[infer] Qwen image preprocessing active: "
+                    f"profile={IMAGE_PREPROCESS_PROFILE} "
+                    f"min_pixels={self.image_min_pixels} "
+                    f"max_pixels={self.image_max_pixels} "
+                    f"checkpoint_size={checkpoint_size}",
+                    flush=True,
+                )
+            except Exception:
+                pass
         self.model = model_cls.from_pretrained(
             str(self.model_path),
             torch_dtype=self.torch_dtype,
@@ -129,7 +157,11 @@ class QwenVLGenerator:
         owned_images: list[Any] = []
         try:
             for cell in image_b64s:
-                images = _decode_images(cell)
+                images = _decode_images(
+                    cell,
+                    image_min_pixels=self.image_min_pixels,
+                    image_max_pixels=self.image_max_pixels,
+                )
                 images_per_sample.append(images)
                 owned_images.extend(images)
             messages_batch = [
@@ -328,7 +360,12 @@ def _image_cell_or_none(value: Any) -> str | None:
     return text
 
 
-def _decode_images(image_cell: str | list[str] | None) -> list[Any]:
+def _decode_images(
+    image_cell: str | list[str] | None,
+    *,
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
+) -> list[Any]:
     if not image_cell:
         return []
     from PIL import Image
@@ -342,7 +379,13 @@ def _decode_images(image_cell: str | list[str] | None) -> list[Any]:
                 raw = raw.split(",", 1)[1]
             data = base64.b64decode(raw)
             with Image.open(io.BytesIO(data)) as source:
-                images.append(source.convert("RGB"))
+                images.append(
+                    prepare_llamafactory_qwen_image(
+                        source,
+                        image_min_pixels=image_min_pixels,
+                        image_max_pixels=image_max_pixels,
+                    )
+                )
         return images
     except Exception:
         for image in reversed(images):

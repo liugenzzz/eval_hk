@@ -12,6 +12,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from PIL import Image
 
 from .dpo_input import DpoCandidate, ImageRef, InputIssue
+from .imaging import prepare_llamafactory_qwen_image
 
 
 _IMAGE_MARKER = "<image>"
@@ -148,6 +149,9 @@ def interleave_content(text: str, images: Iterator[Any]) -> list[dict[str, Any]]
 def open_model_messages(
     candidate: DpoCandidate,
     assets: Mapping[Path, ImageAsset],
+    *,
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> Iterator[list[dict[str, Any]]]:
     """Yield structured model messages whose owned RGB images stay live in context."""
     model_images: list[Image.Image] = []
@@ -167,11 +171,11 @@ def open_model_messages(
                     source = Image.open(io.BytesIO(raw))
                     source_stack.callback(source.close)
                     source.load()
-                    converted = source.convert("RGB")
-                    try:
-                        model_image = converted.copy()
-                    finally:
-                        converted.close()
+                    model_image = prepare_llamafactory_qwen_image(
+                        source,
+                        image_min_pixels=image_min_pixels,
+                        image_max_pixels=image_max_pixels,
+                    )
                 except Exception as exc:
                     raise DpoMultimodalError(
                         f"verified image could not be opened for inference: {path}"

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifacts import ArtifactLayout
+from .imaging import validate_image_pixel_bounds
 from .judge import JudgeSettings
 from .prompting import load_prompt_text
 
@@ -74,6 +75,8 @@ class InferConfig:
     workers_per_gpu: int = 1
     resume: bool = False
     clean_partial: bool = False
+    image_min_pixels: int | None = None
+    image_max_pixels: int | None = None
 
 
 @dataclass(frozen=True)
@@ -94,6 +97,8 @@ class PipelineInferSettings:
     device_map: str = "auto"
     gpu_ids: list[int] = field(default_factory=list)
     workers_per_gpu: int = 1
+    image_min_pixels: int | None = None
+    image_max_pixels: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +182,8 @@ class PipelineConfig:
                     workers_per_gpu=self.infer.workers_per_gpu,
                     resume=True,
                     clean_partial=clean_partial,
+                    image_min_pixels=self.infer.image_min_pixels,
+                    image_max_pixels=self.infer.image_max_pixels,
                 )
             )
         return configs
@@ -330,6 +337,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         "infer.prompt_files",
     )
     limit_raw = infer_raw.get("limit")
+    image_min_pixels, image_max_pixels = _config_image_pixel_bounds(infer_raw)
     infer = PipelineInferSettings(
         prompt_files=prompt_files,
         max_new_tokens=int(infer_raw.get("max_new_tokens", 512)),
@@ -339,6 +347,8 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         device_map=str(infer_raw.get("device_map", "auto")),
         gpu_ids=[int(item) for item in infer_raw.get("gpu_ids", [])],
         workers_per_gpu=max(1, int(infer_raw.get("workers_per_gpu", 1))),
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
 
     judge = _pipeline_judge_settings(raw.get("judge"), base_dir)
@@ -454,6 +464,10 @@ def load_infer_config(path: str | Path) -> InferConfig:
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")
     gpu_ids = infer_raw.get("gpu_ids") or infer_raw.get("GPU_IDS") or []
     overwrite = _infer_bool(infer_raw, "overwrite", "OVERWRITE", None)
+    image_min_pixels, image_max_pixels = _config_image_pixel_bounds(
+        infer_raw,
+        allow_legacy_uppercase=True,
+    )
     return InferConfig(
         model_name=str(infer_raw.get("model_name") or infer_raw.get("MODEL_NAME")),
         model_path=_resolve_path(infer_raw.get("model_path") or infer_raw.get("MODEL_PATH"), base_dir),
@@ -473,7 +487,38 @@ def load_infer_config(path: str | Path) -> InferConfig:
         clean_partial=_infer_bool(
             infer_raw, "clean_partial", "CLEAN_PARTIAL", False
         ),
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
+
+
+def _config_image_pixel_bounds(
+    raw: dict[str, Any],
+    *,
+    allow_legacy_uppercase: bool = False,
+) -> tuple[int | None, int | None]:
+    def select(name: str, legacy_name: str) -> tuple[bool, Any]:
+        if name in raw:
+            return True, raw[name]
+        if allow_legacy_uppercase and legacy_name in raw:
+            return True, raw[legacy_name]
+        return False, None
+
+    min_present, image_min_pixels = select(
+        "image_min_pixels", "IMAGE_MIN_PIXELS"
+    )
+    max_present, image_max_pixels = select(
+        "image_max_pixels", "IMAGE_MAX_PIXELS"
+    )
+    if min_present != max_present:
+        raise ConfigError(
+            "image_min_pixels and image_max_pixels must be provided together "
+            "or both be omitted"
+        )
+    try:
+        return validate_image_pixel_bounds(image_min_pixels, image_max_pixels)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from exc
 
 
 def _infer_bool(

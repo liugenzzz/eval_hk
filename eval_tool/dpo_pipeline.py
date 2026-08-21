@@ -39,6 +39,7 @@ from .dpo_input import (
 from .dpo_judge import JudgeJob, build_dpo_judge_request, judge_candidates
 from .dpo_multimodal import ImagePreflightResult, preflight_candidate_images
 from .dpo_prompts import load_dpo_prompt
+from .imaging import IMAGE_PREPROCESS_PROFILE
 from .dpo_report import (
     AuditRecord,
     build_summary,
@@ -628,6 +629,13 @@ def _manifest_data(
             "device_map": config.infer.device_map,
             "gpu_ids": list(config.infer.gpu_ids),
             "workers_per_gpu": config.infer.workers_per_gpu,
+            "image_min_pixels": config.infer.image_min_pixels,
+            "image_max_pixels": config.infer.image_max_pixels,
+            "image_preprocess_profile": (
+                IMAGE_PREPROCESS_PROFILE
+                if config.infer.image_min_pixels is not None
+                else None
+            ),
             "checkpoint": dict(checkpoint),
         },
         "fingerprints": {

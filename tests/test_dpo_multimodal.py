@@ -17,16 +17,25 @@ from eval_tool.dpo_multimodal import (
     open_model_messages,
     preflight_candidate_images,
 )
+from eval_tool.imaging import prepare_llamafactory_qwen_image
 
 
 def _write_image(
     path: Path,
     *,
     format_: str = "PNG",
-    color: tuple[int, int, int] = (12, 34, 56),
+    color: int | tuple[int, ...] = (12, 34, 56),
+    mode: str = "RGB",
+    size: tuple[int, int] = (2, 2),
 ) -> bytes:
-    Image.new("RGB", (2, 2), color).save(path, format=format_)
+    with Image.new(mode, size, color) as image:
+        image.save(path, format=format_)
     return path.read_bytes()
+
+
+def _assert_image_closed(image: Image.Image) -> None:
+    with pytest.raises(ValueError):
+        image.getpixel((0, 0))
 
 
 def _source(tmp_path: Path, *, record_index: int = 0) -> SourceRef:
@@ -312,11 +321,165 @@ def test_open_model_messages_preserves_turns_markers_order_and_lifetimes(
         assert "CHOSEN_MUST_NOT_APPEAR" not in all_text
 
     for image in [*model_images, *source_images]:
-        with pytest.raises(ValueError):
-            image.getpixel((0, 0))
+        _assert_image_closed(image)
 
 
-def test_open_model_messages_closes_images_when_context_body_raises(tmp_path):
+def test_open_model_messages_prepares_large_rgba_and_small_images_from_original_modes(
+    tmp_path, monkeypatch
+):
+    large_path = tmp_path / "large-rgba.png"
+    small_path = tmp_path / "small-gray.png"
+    large_raw = _write_image(
+        large_path,
+        color=(10, 20, 30, 128),
+        mode="RGBA",
+        size=(1_600, 800),
+    )
+    small_raw = _write_image(
+        small_path,
+        color=7,
+        mode="L",
+        size=(100, 50),
+    )
+    candidate = _candidate(
+        tmp_path,
+        conversations=(DpoTurn("human", "<image>large<image>small"),),
+        images=(
+            ImageRef(original="large-rgba.png", resolved=large_path),
+            ImageRef(original="small-gray.png", resolved=small_path),
+        ),
+    )
+    assets = preflight_candidate_images([candidate]).assets
+    source_images: list[Image.Image] = []
+    prepare_calls: list[
+        tuple[str, tuple[int, int], object, int | None, int | None]
+    ] = []
+    real_open = Image.open
+
+    def tracking_open(*args, **kwargs):
+        opened = real_open(*args, **kwargs)
+        source_images.append(opened)
+        return opened
+
+    def tracking_prepare(
+        source,
+        *,
+        image_min_pixels,
+        image_max_pixels,
+    ):
+        prepare_calls.append(
+            (
+                source.mode,
+                source.size,
+                source.getpixel((0, 0)),
+                image_min_pixels,
+                image_max_pixels,
+            )
+        )
+        return prepare_llamafactory_qwen_image(
+            source,
+            image_min_pixels=image_min_pixels,
+            image_max_pixels=image_max_pixels,
+        )
+
+    monkeypatch.setattr(dpo_multimodal.Image, "open", tracking_open)
+    monkeypatch.setattr(
+        dpo_multimodal,
+        "prepare_llamafactory_qwen_image",
+        tracking_prepare,
+        raising=False,
+    )
+
+    with open_model_messages(
+        candidate,
+        assets,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    ) as messages:
+        model_images = [
+            part["image"]
+            for part in messages[0]["content"]
+            if part["type"] == "image"
+        ]
+        assert [image.size for image in model_images] == [
+            (1_086, 543),
+            (362, 181),
+        ]
+        assert [image.mode for image in model_images] == ["RGB", "RGB"]
+        assert model_images[0].getpixel((0, 0)) is not None
+        assert model_images[1].getpixel((0, 0)) == (7, 7, 7)
+        assert prepare_calls == [
+            ("RGBA", (1_600, 800), (10, 20, 30, 128), 65_536, 589_824),
+            ("L", (100, 50), 7, 65_536, 589_824),
+        ]
+        assert all(image.getpixel((0, 0)) is not None for image in source_images)
+
+    for image in [*model_images, *source_images]:
+        _assert_image_closed(image)
+    assert large_path.read_bytes() == large_raw
+    assert small_path.read_bytes() == small_raw
+    for path, raw in ((large_path, large_raw), (small_path, small_raw)):
+        _, encoded = image_data_url(assets[path.resolve()]).split(",", 1)
+        assert base64.b64decode(encoded) == raw
+
+
+def test_open_model_messages_default_keeps_size_and_uses_owned_rgb_copy(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "default-rgba.png"
+    _write_image(
+        path,
+        color=(1, 2, 3, 4),
+        mode="RGBA",
+        size=(40, 30),
+    )
+    candidate = _candidate(
+        tmp_path,
+        conversations=(DpoTurn("human", "<image>question"),),
+        images=(ImageRef(original="default-rgba.png", resolved=path),),
+    )
+    assets = preflight_candidate_images([candidate]).assets
+    prepare_sources: list[Image.Image] = []
+    real_prepare = prepare_llamafactory_qwen_image
+
+    def tracking_prepare(
+        source,
+        *,
+        image_min_pixels,
+        image_max_pixels,
+    ):
+        prepare_sources.append(source)
+        assert source.mode == "RGBA"
+        assert source.getpixel((0, 0)) == (1, 2, 3, 4)
+        return real_prepare(
+            source,
+            image_min_pixels=image_min_pixels,
+            image_max_pixels=image_max_pixels,
+        )
+
+    monkeypatch.setattr(
+        dpo_multimodal,
+        "prepare_llamafactory_qwen_image",
+        tracking_prepare,
+        raising=False,
+    )
+
+    with open_model_messages(candidate, assets) as messages:
+        model_image = messages[0]["content"][0]["image"]
+        assert len(prepare_sources) == 1
+        assert model_image is not prepare_sources[0]
+        assert model_image.size == (40, 30)
+        assert model_image.mode == "RGB"
+        assert model_image.getpixel((0, 0)) == (1, 2, 3)
+        assert prepare_sources[0].getpixel((0, 0)) == (1, 2, 3, 4)
+
+    _assert_image_closed(model_image)
+    _assert_image_closed(prepare_sources[0])
+
+
+def test_open_model_messages_closes_images_when_context_body_raises(
+    tmp_path, monkeypatch
+):
     path = tmp_path / "image.png"
     _write_image(path)
     candidate = _candidate(
@@ -326,6 +489,15 @@ def test_open_model_messages_closes_images_when_context_body_raises(tmp_path):
     )
     assets = preflight_candidate_images([candidate]).assets
     model_image = None
+    source_images: list[Image.Image] = []
+    real_open = Image.open
+
+    def tracking_open(*args, **kwargs):
+        opened = real_open(*args, **kwargs)
+        source_images.append(opened)
+        return opened
+
+    monkeypatch.setattr(dpo_multimodal.Image, "open", tracking_open)
 
     with pytest.raises(RuntimeError, match="consumer failed"):
         with open_model_messages(candidate, assets) as messages:
@@ -334,8 +506,56 @@ def test_open_model_messages_closes_images_when_context_body_raises(tmp_path):
             raise RuntimeError("consumer failed")
 
     assert model_image is not None
-    with pytest.raises(ValueError):
-        model_image.getpixel((0, 0))
+    _assert_image_closed(model_image)
+    assert len(source_images) == 1
+    _assert_image_closed(source_images[0])
+
+
+def test_open_model_messages_closes_source_when_preparation_raises(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "image.png"
+    _write_image(path, size=(100, 50))
+    candidate = _candidate(
+        tmp_path,
+        conversations=(DpoTurn("human", "<image>question"),),
+        images=(ImageRef(original="image.png", resolved=path),),
+    )
+    assets = preflight_candidate_images([candidate]).assets
+    source_images: list[Image.Image] = []
+    real_open = Image.open
+
+    def tracking_open(*args, **kwargs):
+        opened = real_open(*args, **kwargs)
+        source_images.append(opened)
+        return opened
+
+    def failing_prepare(source, **kwargs):
+        assert source.getpixel((0, 0)) == (12, 34, 56)
+        raise RuntimeError("synthetic preparation failure")
+
+    monkeypatch.setattr(dpo_multimodal.Image, "open", tracking_open)
+    monkeypatch.setattr(
+        dpo_multimodal,
+        "prepare_llamafactory_qwen_image",
+        failing_prepare,
+        raising=False,
+    )
+
+    with pytest.raises(
+        DpoMultimodalError,
+        match="verified image could not be opened for inference",
+    ):
+        with open_model_messages(
+            candidate,
+            assets,
+            image_min_pixels=65_536,
+            image_max_pixels=589_824,
+        ):
+            raise AssertionError("preparation failure must prevent context entry")
+
+    assert len(source_images) == 1
+    _assert_image_closed(source_images[0])
 
 
 def test_preflight_fingerprint_change_blocks_model_messages_and_data_url(tmp_path):

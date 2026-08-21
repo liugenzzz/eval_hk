@@ -1,6 +1,39 @@
 import importlib
+import hashlib
+import json
 
 import pytest
+
+from eval_tool.imaging import IMAGE_PREPROCESS_PROFILE
+
+
+def _legacy_fingerprint(model_path, prompt_text, max_new_tokens, dataset_key, dataset_name, rows):
+    input_digest = hashlib.sha256()
+    for row in rows:
+        input_digest.update(
+            json.dumps(
+                row,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        input_digest.update(b"\n")
+    payload = {
+        "model_path": str(model_path.resolve()),
+        "prompt_text": prompt_text,
+        "max_new_tokens": max_new_tokens,
+        "dataset_key": dataset_key,
+        "dataset_name": dataset_name,
+        "input_digest": input_digest.hexdigest(),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:16]
 
 
 def test_fingerprint_is_stable_and_changes_with_inference_input(tmp_path):
@@ -61,6 +94,106 @@ def test_fingerprint_covers_every_run_identity_field(tmp_path):
 
     assert baseline not in variants
     assert len(variants) == 5
+
+
+def test_fingerprint_changes_for_each_configured_image_pixel_bound(tmp_path):
+    infer_cache = importlib.import_module("eval_tool.infer_cache")
+    args = (tmp_path / "model", "prompt", 32, "vqa", "aero_vqa", [{"index": "1"}])
+
+    fingerprints = {
+        infer_cache.build_infer_fingerprint(
+            *args, image_min_pixels=65536, image_max_pixels=589824
+        ),
+        infer_cache.build_infer_fingerprint(
+            *args, image_min_pixels=32768, image_max_pixels=589824
+        ),
+        infer_cache.build_infer_fingerprint(
+            *args, image_min_pixels=65536, image_max_pixels=786432
+        ),
+    }
+
+    assert len(fingerprints) == 3
+
+
+def test_fingerprint_payload_identifies_image_preprocess_profile(tmp_path, monkeypatch):
+    infer_cache = importlib.import_module("eval_tool.infer_cache")
+    original_dumps = infer_cache.json.dumps
+    payloads = []
+
+    def capture_payload(value, *args, **kwargs):
+        if isinstance(value, dict) and "input_digest" in value:
+            payloads.append(value)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(infer_cache.json, "dumps", capture_payload)
+    infer_cache.build_infer_fingerprint(
+        tmp_path / "model",
+        "prompt",
+        32,
+        "vqa",
+        "aero_vqa",
+        [{"index": "1"}],
+        image_min_pixels=65536,
+        image_max_pixels=589824,
+    )
+
+    assert payloads[-1]["image_preprocess"] == {
+        "profile": IMAGE_PREPROCESS_PROFILE,
+        "min_pixels": 65536,
+        "max_pixels": 589824,
+    }
+
+
+def test_none_image_pixel_bounds_preserve_legacy_fingerprint_payload(tmp_path):
+    infer_cache = importlib.import_module("eval_tool.infer_cache")
+    model_path = tmp_path / "model"
+    rows = [{"index": "1", "question": "q"}]
+    expected = _legacy_fingerprint(
+        model_path, "prompt", 32, "vqa", "aero_vqa", rows
+    )
+
+    omitted = infer_cache.build_infer_fingerprint(
+        model_path, "prompt", 32, "vqa", "aero_vqa", rows
+    )
+    explicit_none = infer_cache.build_infer_fingerprint(
+        model_path,
+        "prompt",
+        32,
+        "vqa",
+        "aero_vqa",
+        rows,
+        image_min_pixels=None,
+        image_max_pixels=None,
+    )
+
+    assert omitted == expected
+    assert explicit_none == expected
+
+
+@pytest.mark.parametrize(
+    ("image_min_pixels", "image_max_pixels", "message"),
+    [
+        (65536, None, "provided together"),
+        (True, 589824, "image_min_pixels.*int"),
+        (589825, 589824, "image_min_pixels.*<=.*image_max_pixels"),
+    ],
+)
+def test_fingerprint_defensively_validates_image_pixel_bounds(
+    tmp_path, image_min_pixels, image_max_pixels, message
+):
+    infer_cache = importlib.import_module("eval_tool.infer_cache")
+
+    with pytest.raises(ValueError, match=message):
+        infer_cache.build_infer_fingerprint(
+            tmp_path / "model",
+            "prompt",
+            32,
+            "vqa",
+            "aero_vqa",
+            [],
+            image_min_pixels=image_min_pixels,
+            image_max_pixels=image_max_pixels,
+        )
 
 
 def test_store_reloads_all_worker_shards(tmp_path):

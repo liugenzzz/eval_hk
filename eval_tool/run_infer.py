@@ -50,6 +50,8 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
                 max_new_tokens=config.max_new_tokens,
                 torch_dtype=config.torch_dtype,
                 device_map=config.device_map,
+                image_min_pixels=config.image_min_pixels,
+                image_max_pixels=config.image_max_pixels,
             )
         return local_generator
 
@@ -156,6 +158,8 @@ def _run_dataset_resumable_unlocked(
         dataset_key,
         dataset_name,
         rows,
+        image_min_pixels=config.image_min_pixels,
+        image_max_pixels=config.image_max_pixels,
     )
     store = InferShardStore(config.out_dir / "_partial", dataset_key, fingerprint)
     manifest_path = out_path.with_suffix(".infer.json")
@@ -368,6 +372,8 @@ def _run_dataset_parallel_resumable(
                 config.torch_dtype,
                 str(store.partial_dir),
                 store.fingerprint,
+                config.image_min_pixels,
+                config.image_max_pixels,
             ): worker_id
             for worker_id, (gpu_id, chunk) in enumerate(zip(worker_gpus, chunks))
             if chunk
@@ -403,6 +409,8 @@ def _infer_worker_resumable(
     torch_dtype: str,
     partial_dir: str,
     fingerprint: str,
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> int:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     generator = QwenVLGenerator(
@@ -410,6 +418,8 @@ def _infer_worker_resumable(
         max_new_tokens=max_new_tokens,
         torch_dtype=torch_dtype,
         device_map="auto",
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
     rows = [row for _, row in indexed_rows]
     store = InferShardStore(partial_dir, dataset_key, fingerprint)
@@ -454,6 +464,8 @@ def _run_dataset_parallel(config: InferConfig, dataset_key: str, rows: list[Mapp
                     config.max_new_tokens,
                     config.batch_size,
                     config.torch_dtype,
+                    config.image_min_pixels,
+                    config.image_max_pixels,
                 )
             )
         iterator = as_completed(futures)
@@ -473,6 +485,8 @@ def _infer_worker(
     max_new_tokens: int,
     batch_size: int,
     torch_dtype: str,
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> list[tuple[int, str]]:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     generator = QwenVLGenerator(
@@ -480,6 +494,8 @@ def _infer_worker(
         max_new_tokens=max_new_tokens,
         torch_dtype=torch_dtype,
         device_map="auto",
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
     indices = [idx for idx, _ in indexed_rows]
     rows = [row for _, row in indexed_rows]

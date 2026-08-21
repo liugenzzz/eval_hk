@@ -541,6 +541,56 @@ def test_manifest_and_warnings_never_expose_the_judge_api_key(tmp_path):
     assert "sk-secret-value" not in artifacts["warnings.log"].read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize(
+    ("infer_overrides", "expected"),
+    [
+        pytest.param(
+            {},
+            {
+                "image_min_pixels": None,
+                "image_max_pixels": None,
+                "image_preprocess_profile": None,
+            },
+            id="disabled",
+        ),
+        pytest.param(
+            {"image_min_pixels": 65_536, "image_max_pixels": 589_824},
+            {
+                "image_min_pixels": 65_536,
+                "image_max_pixels": 589_824,
+                "image_preprocess_profile": "llamafactory-0.9.5-qwen-static-v1",
+            },
+            id="enabled",
+        ),
+    ],
+)
+def test_manifest_records_image_preprocess_identity(
+    tmp_path, infer_overrides, expected
+):
+    source = write_json(
+        tmp_path / "alpaca.json",
+        [{"instruction": "question", "output": "reference"}],
+    )
+    config = make_config(tmp_path, [source], infer_overrides=infer_overrides)
+
+    result = run_build_dpo(
+        config,
+        generator_factory=generator_factory(lambda text: "generated"),
+    )
+
+    manifest = json.loads(
+        artifacts_of(result)["manifest.json"].read_text(encoding="utf-8")
+    )
+    assert {
+        key: manifest["model"][key]
+        for key in (
+            "image_min_pixels",
+            "image_max_pixels",
+            "image_preprocess_profile",
+        )
+    } == expected
+
+
 # ----------------------------------------------------------------------------
 # dry run
 # ----------------------------------------------------------------------------

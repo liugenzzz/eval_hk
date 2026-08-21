@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -152,6 +153,35 @@ def _spawn_generator_factory(config):
     return _SpawnGenerator()
 
 
+def _track_open_model_message_bounds(monkeypatch):
+    calls = []
+    real_open_model_messages = dpo_infer.open_model_messages
+
+    @contextmanager
+    def tracking_open_model_messages(
+        candidate,
+        assets,
+        *,
+        image_min_pixels=None,
+        image_max_pixels=None,
+    ):
+        calls.append((image_min_pixels, image_max_pixels))
+        with real_open_model_messages(
+            candidate,
+            assets,
+            image_min_pixels=image_min_pixels,
+            image_max_pixels=image_max_pixels,
+        ) as messages:
+            yield messages
+
+    monkeypatch.setattr(
+        dpo_infer,
+        "open_model_messages",
+        tracking_open_model_messages,
+    )
+    return calls
+
+
 def test_worker_completion_updates_and_closes_parent_progress(monkeypatch):
     events: list[tuple[str, object]] = []
 
@@ -230,6 +260,22 @@ def test_model_receives_gold_history_and_current_human_only():
     assert outcomes[0].prediction == "history question\ncurrent question"
 
 
+def test_public_isolation_passes_image_pixel_bounds_to_model_messages(monkeypatch):
+    calls = _track_open_model_message_bounds(monkeypatch)
+
+    outcomes = infer_batch_with_isolation(
+        [_candidate("sample-0", "question")],
+        _EchoGenerator(),
+        enable_thinking=False,
+        append=lambda values: None,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    assert outcomes[0].prediction == "question"
+    assert calls == [(65_536, 589_824)]
+
+
 def test_successful_batch_appends_each_terminal_result_immediately():
     candidates = [_candidate(f"sample-{index}", f"q{index}") for index in range(3)]
     appended = []
@@ -292,6 +338,31 @@ def test_data_batch_failure_bisects_in_original_order_to_one_bad_sample():
     ]
 
 
+def test_recursive_isolation_preserves_image_pixel_bounds(monkeypatch):
+    calls = _track_open_model_message_bounds(monkeypatch)
+    candidates = [
+        _candidate("sample-0", "first"),
+        _candidate("sample-1", "bad"),
+        _candidate("sample-2", "last"),
+    ]
+
+    outcomes = infer_batch_with_isolation(
+        candidates,
+        _SelectiveGenerator(),
+        enable_thinking=False,
+        append=lambda values: None,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    assert [outcome.error_type for outcome in outcomes] == [
+        None,
+        "inference_error",
+        None,
+    ]
+    assert calls == [(65_536, 589_824)] * 8
+
+
 def test_empty_and_identical_outputs_remain_cached_successes_for_pipeline_filtering(tmp_path):
     candidates = [
         _candidate("sample-0", "empty", chosen="gold"),
@@ -311,6 +382,29 @@ def test_empty_and_identical_outputs_remain_cached_successes_for_pipeline_filter
     assert outcomes["sample-1"].prediction == "same"
     assert all(outcome.error_type is None for outcome in outcomes.values())
     assert [record["status"] for record in store.load().values()] == ["ok", "ok"]
+
+
+def test_sequential_inference_passes_configured_image_pixel_bounds(
+    tmp_path, monkeypatch
+):
+    candidate = _candidate("sample-0", "question")
+    store = _store(tmp_path, [candidate])
+    calls = _track_open_model_message_bounds(monkeypatch)
+
+    outcomes = run_dpo_inference(
+        [candidate],
+        {},
+        _config(
+            tmp_path,
+            image_min_pixels=65_536,
+            image_max_pixels=589_824,
+        ),
+        store,
+        generator_factory=lambda config: _EchoGenerator(),
+    )
+
+    assert outcomes["sample-0"].prediction == "question"
+    assert calls == [(65_536, 589_824)]
 
 
 @pytest.mark.parametrize(
@@ -440,6 +534,108 @@ def test_completed_inference_cache_is_scanned_only_once(tmp_path, monkeypatch):
 
     assert load_calls == 1
     assert list(outcomes) == ["sample-0", "sample-1", "sample-2"]
+
+
+def test_worker_config_dto_round_trips_image_pixel_bounds(tmp_path):
+    config = _config(
+        tmp_path,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    dto = dpo_infer._config_to_dto(config)
+    restored = dpo_infer._config_from_dto(dto)
+
+    assert dto.image_min_pixels == 65_536
+    assert dto.image_max_pixels == 589_824
+    assert restored == config
+
+
+def test_default_generator_factory_passes_image_pixel_bounds(tmp_path, monkeypatch):
+    import eval_tool.infer as infer_module
+
+    captured = {}
+
+    class FakeQwenVLGenerator:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(infer_module, "QwenVLGenerator", FakeQwenVLGenerator)
+    config = _config(
+        tmp_path,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+
+    generator = dpo_infer._default_generator_factory(config)
+
+    assert isinstance(generator, FakeQwenVLGenerator)
+    assert captured["image_min_pixels"] == 65_536
+    assert captured["image_max_pixels"] == 589_824
+
+
+def test_worker_entry_passes_reconstructed_image_pixel_bounds(
+    tmp_path, monkeypatch
+):
+    candidate = _candidate("sample-0", "question")
+    store = _store(tmp_path, [candidate])
+    config = _config(
+        tmp_path,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+    calls = _track_open_model_message_bounds(monkeypatch)
+    messages = []
+
+    class FakeQueue:
+        def put(self, message):
+            messages.append(message)
+
+    class FakeEvent:
+        def __init__(self):
+            self.value = False
+
+        def is_set(self):
+            return self.value
+
+        def set(self):
+            self.value = True
+
+        def wait(self):
+            return True
+
+    launch = dpo_infer._WorkerLaunch(
+        worker_id=0,
+        gpu_id=7,
+        config=dpo_infer._config_to_dto(config),
+        batches=((dpo_infer._candidate_to_dto(candidate),),),
+        assets=(),
+        phase_dir=str(store.phase_dir),
+        fingerprint=store.fingerprint,
+        expected_sample_ids=(candidate.sample_id,),
+        attempt_id=store.attempt_id,
+        fsync_every=store.fsync_every,
+        factory_spec=None,
+    )
+    start_event = FakeEvent()
+    fatal_event = FakeEvent()
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before-test")
+    monkeypatch.setattr(
+        dpo_infer,
+        "_default_generator_factory",
+        lambda worker_config: _EchoGenerator(),
+    )
+
+    dpo_infer._dpo_inference_worker_entry(
+        launch,
+        FakeQueue(),
+        start_event,
+        fatal_event,
+    )
+
+    assert calls == [(65_536, 589_824)]
+    assert [message[0] for message in messages] == ["ready", "progress", "done"]
+    assert fatal_event.is_set() is False
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows spawn contract")

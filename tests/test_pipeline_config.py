@@ -74,6 +74,78 @@ def test_load_pipeline_config_resolves_shared_and_model_paths(tmp_path):
     assert is_pipeline_config(path) is True
 
 
+def test_load_pipeline_config_reads_and_derives_image_pixel_bounds(tmp_path):
+    config = load_pipeline_config(
+        _write_pipeline(
+            tmp_path,
+            infer={
+                "image_min_pixels": 65536,
+                "image_max_pixels": 589824,
+            },
+        )
+    )
+
+    assert config.infer.image_min_pixels == 65536
+    assert config.infer.image_max_pixels == 589824
+    derived = config.to_infer_configs()[0]
+    assert derived.image_min_pixels == 65536
+    assert derived.image_max_pixels == 589824
+
+
+@pytest.mark.parametrize(
+    "infer",
+    [
+        {},
+        {"image_min_pixels": None, "image_max_pixels": None},
+        {"IMAGE_MIN_PIXELS": 65536, "IMAGE_MAX_PIXELS": 589824},
+    ],
+)
+def test_pipeline_image_pixel_bounds_default_to_none_and_ignore_uppercase(
+    tmp_path, infer
+):
+    config = load_pipeline_config(_write_pipeline(tmp_path, infer=infer))
+
+    assert config.infer.image_min_pixels is None
+    assert config.infer.image_max_pixels is None
+
+
+@pytest.mark.parametrize(
+    ("infer", "message"),
+    [
+        ({"image_max_pixels": 589824}, r"image_min_pixels.*image_max_pixels.*together"),
+        (
+            {"image_min_pixels": 65536, "image_max_pixels": False},
+            r"image_max_pixels.*int",
+        ),
+        (
+            {"image_min_pixels": 65536, "image_max_pixels": 589824.0},
+            r"image_max_pixels.*int",
+        ),
+        (
+            {"image_min_pixels": 65536, "image_max_pixels": "589824"},
+            r"image_max_pixels.*int",
+        ),
+        (
+            {"image_min_pixels": 0, "image_max_pixels": 589824},
+            r"image_min_pixels.*> 0",
+        ),
+        (
+            {"image_min_pixels": 65536, "image_max_pixels": -1},
+            r"image_max_pixels.*> 0",
+        ),
+        (
+            {"image_min_pixels": 589825, "image_max_pixels": 589824},
+            r"image_min_pixels.*<=.*image_max_pixels",
+        ),
+    ],
+)
+def test_load_pipeline_config_rejects_invalid_image_pixel_bounds(
+    tmp_path, infer, message
+):
+    with pytest.raises(ConfigError, match=message):
+        load_pipeline_config(_write_pipeline(tmp_path, infer=infer))
+
+
 @pytest.mark.parametrize(
     ("models", "message"),
     [
@@ -249,12 +321,18 @@ def test_model_filter_preserves_requested_order_and_rejects_bad_names(tmp_path):
 
 def test_pipeline_example_is_complete_and_parseable():
     example_path = Path(__file__).parents[1] / "pipeline.example.json"
+    raw = json.loads(example_path.read_text(encoding="utf-8"))
+
+    assert raw["infer"]["image_min_pixels"] == 65_536
+    assert raw["infer"]["image_max_pixels"] == 589_824
 
     config = load_pipeline_config(example_path)
 
     assert [model.name for model in config.models] == ["base", "sft_ep2"]
     assert config.convert_input is not None
     assert config.infer.max_new_tokens == 1024
+    assert config.infer.image_min_pixels == 65_536
+    assert config.infer.image_max_pixels == 589_824
     assert config.judge.api_key == "sk-local"
     assert config.to_infer_configs()[0].resume is True
 

@@ -19,6 +19,25 @@ python -m eval_tool all --config pipeline.json
 
 旧入口仍保留：`python -m eval_tool.run_infer --config infer_config.json`、`python -m eval_tool.run_eval --config config.json`，以及无子命令的 `python -m eval_tool --config config.json`。
 
+## 图像像素面积与训练配置对齐
+
+`infer_config.example.json`、`pipeline.example.json` 和 `dpo.example.json` 的 `infer` 块都显式配置：
+
+```json
+{
+  "image_min_pixels": 65536,
+  "image_max_pixels": 589824
+}
+```
+
+这两个值限制的是 `宽 × 高` 的总像素面积，不是单独的宽或高。两项必须同时省略、同时为 `null`，或同时设为正整数，并满足 `image_min_pixels <= image_max_pixels`。省略或同时为 `null` 时维持旧推理行为。示例值与当前 LLaMAFactory `0.9.5.dev0` 训练配置一致；启用后，本项目在 checkpoint 自带的 Hugging Face processor 之前按固定的 `llamafactory-0.9.5-qwen-static-v1` 顺序预缩放，checkpoint processor 随后仍会继续执行自身处理。
+
+该设置覆盖旧版 TSV/base64 普通推理、统一 pipeline 推理，以及 DPO 构建器的本地生成模型路径；它不改变 DPO Judge 收到的原始图片。降低 `image_max_pixels` 通常可减少视觉 token 和显存占用，但可能丢失细节；提高 `image_min_pixels` 会放大小图。
+
+更改任一值都会改变 inference fingerprint/断点身份。统一入口需要显式运行 `python -m eval_tool infer --config pipeline.json --overwrite`，或改用新的 `work_dir`；旧 `run_infer` 入口没有对应 CLI 开关，应在 `infer_config.json` 中设置 `"overwrite": true`，或改用新的 `out_dir`；DPO 使用 `python -m eval_tool build-dpo --config dpo.json --overwrite`，或改用新的 `work_dir`。
+
+源图生成和推理期像素规整是两层独立变换。代码审计确认，仓库中的 JPEG quality 90、最长边 1280 逻辑实际位于 `select_p123_data.py::encode_image`；`aero_vqa_dataset .py` 本身不执行该压缩。离线步骤如果已经改变源图字节，`image_min_pixels` / `image_max_pixels` 不会撤销或替代它。要达到逐像素一致，还必须使用相同源图字节、Pillow/Transformers 版本，以及相同模型 checkpoint processor 配置。
+
 ## 独立 JSON/JSONL → DPO 数据构建器
 
 `build-dpo` 是一条独立通路：直接读取 Alpaca/ShareGPT 的 JSON 或 JSONL，以原始标准答案为 `chosen`，让本地 Qwen/VLM 生成 `rejected`，最终发布严格 ShareGPT DPO JSONL。它不先转成 TSV/XLSX，也不改变上面的旧评估入口。
@@ -134,6 +153,8 @@ F:/path/to/work_dir/base/base_aero_vqa.xlsx
 ```json
 {
   "batch_size": 1,
+  "image_min_pixels": 65536,
+  "image_max_pixels": 589824,
   "device_map": "auto",
   "gpu_ids": [],
   "workers_per_gpu": 1
@@ -141,6 +162,7 @@ F:/path/to/work_dir/base/base_aero_vqa.xlsx
 ```
 
 - `batch_size`：单个模型实例一次处理多少条。显存够可以调大，比如 2、4、8。
+- `image_min_pixels` / `image_max_pixels`：交给 checkpoint processor 前的总像素面积下界/上界，规则见上文“图像像素面积与训练配置对齐”。
 - `device_map: "auto"`：让 transformers/accelerate 自动把一个大模型切到多张卡上，这是模型并行，适合单卡放不下模型。
 - `gpu_ids: [0, 1, 2, 3]`：启用数据并行。脚本会为每张卡启动独立 worker，每个 worker 加载一份模型，分片处理 TSV 行，最后按原 index 顺序合并输出。
 - `workers_per_gpu`：每张卡几个 worker。通常先用 1；同卡多 worker 只有在模型小、显存足且 GPU 利用率低时才考虑。

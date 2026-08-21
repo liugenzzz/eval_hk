@@ -13,6 +13,7 @@ from typing import Any, BinaryIO, Callable, Iterator, Literal, Mapping, Sequence
 from .dpo_config import DpoInferConfig, RubricName
 from .dpo_input import DpoCandidate, InputSummary
 from .dpo_multimodal import ImageAsset
+from .imaging import IMAGE_PREPROCESS_PROFILE, validate_image_pixel_bounds
 from .judge import JudgeSettings
 
 
@@ -963,6 +964,10 @@ def build_dpo_inference_fp(
     config: DpoInferConfig,
     checkpoint: Mapping[str, Any],
 ) -> str:
+    image_min_pixels, image_max_pixels = validate_image_pixel_bounds(
+        config.image_min_pixels,
+        config.image_max_pixels,
+    )
     candidate_material: list[dict[str, Any]] = []
     for candidate in candidates:
         image_material = [
@@ -980,6 +985,23 @@ def build_dpo_inference_fp(
             }
         )
 
+    model_identity = {
+        "model_name": config.model_name,
+        "model_path": str(config.model_path),
+        "enable_thinking": config.enable_thinking,
+        "max_new_tokens": config.max_new_tokens,
+        "batch_size": config.batch_size,
+        "torch_dtype": config.torch_dtype,
+        "device_map": config.device_map,
+        "gpu_ids": list(config.gpu_ids),
+    }
+    if image_min_pixels is not None:
+        model_identity["image_preprocess"] = {
+            "profile": IMAGE_PREPROCESS_PROFILE,
+            "min_pixels": image_min_pixels,
+            "max_pixels": image_max_pixels,
+        }
+
     common_identity = {
         "normalizer_version": DPO_NORMALIZER_VERSION,
         "inputs": [
@@ -992,16 +1014,7 @@ def build_dpo_inference_fp(
             }
             for summary in input_summaries
         ],
-        "model": {
-            "model_name": config.model_name,
-            "model_path": str(config.model_path),
-            "enable_thinking": config.enable_thinking,
-            "max_new_tokens": config.max_new_tokens,
-            "batch_size": config.batch_size,
-            "torch_dtype": config.torch_dtype,
-            "device_map": config.device_map,
-            "gpu_ids": list(config.gpu_ids),
-        },
+        "model": model_identity,
         "checkpoint": checkpoint,
         "candidates": candidate_material,
     }

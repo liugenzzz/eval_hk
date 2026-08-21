@@ -78,6 +78,8 @@ class _WorkerConfigDto:
     batch_size: int
     torch_dtype: str
     device_map: str
+    image_min_pixels: int | None
+    image_max_pixels: int | None
 
 
 @dataclass(frozen=True)
@@ -105,6 +107,8 @@ def infer_batch_with_isolation(
     *,
     enable_thinking: bool,
     append: Callable[[Sequence[InferenceOutcome]], None],
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> list[InferenceOutcome]:
     """Infer a batch, recursively isolating ordinary sample/data failures."""
 
@@ -114,6 +118,8 @@ def infer_batch_with_isolation(
         enable_thinking=enable_thinking,
         append=append,
         assets={},
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
 
 
@@ -124,6 +130,8 @@ def _infer_batch_with_isolation(
     enable_thinking: bool,
     append: Callable[[Sequence[InferenceOutcome]], None],
     assets: Mapping[Path, ImageAsset],
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> list[InferenceOutcome]:
     if not batch:
         return []
@@ -136,7 +144,14 @@ def _infer_batch_with_isolation(
             )
         with ExitStack() as stack:
             messages_batch = [
-                stack.enter_context(open_model_messages(candidate, assets))
+                stack.enter_context(
+                    open_model_messages(
+                        candidate,
+                        assets,
+                        image_min_pixels=image_min_pixels,
+                        image_max_pixels=image_max_pixels,
+                    )
+                )
                 for candidate in batch
             ]
             predictions = method(
@@ -173,6 +188,8 @@ def _infer_batch_with_isolation(
                 enable_thinking=enable_thinking,
                 append=append,
                 assets=assets,
+                image_min_pixels=image_min_pixels,
+                image_max_pixels=image_max_pixels,
             )
             right = _infer_batch_with_isolation(
                 batch[midpoint:],
@@ -180,6 +197,8 @@ def _infer_batch_with_isolation(
                 enable_thinking=enable_thinking,
                 append=append,
                 assets=assets,
+                image_min_pixels=image_min_pixels,
+                image_max_pixels=image_max_pixels,
             )
             return [*left, *right]
 
@@ -291,6 +310,8 @@ def _run_sequential_inference(
                 enable_thinking=config.enable_thinking,
                 append=append,
                 assets=assets,
+                image_min_pixels=config.image_min_pixels,
+                image_max_pixels=config.image_max_pixels,
             )
     finally:
         store.sync()
@@ -598,6 +619,8 @@ def _dpo_inference_worker_entry(
                 enable_thinking=config.enable_thinking,
                 append=append,
                 assets=assets,
+                image_min_pixels=config.image_min_pixels,
+                image_max_pixels=config.image_max_pixels,
             )
             status_queue.put(("progress", launch.worker_id, 1, None))
         terminal = ("done", launch.worker_id, None, None)
@@ -639,6 +662,8 @@ def _default_generator_factory(config: DpoInferConfig) -> MessageBatchGenerator:
         max_new_tokens=config.max_new_tokens,
         torch_dtype=config.torch_dtype,
         device_map=config.device_map,
+        image_min_pixels=config.image_min_pixels,
+        image_max_pixels=config.image_max_pixels,
     )
 
 
@@ -769,6 +794,8 @@ def _config_to_dto(config: DpoInferConfig) -> _WorkerConfigDto:
         batch_size=config.batch_size,
         torch_dtype=config.torch_dtype,
         device_map=config.device_map,
+        image_min_pixels=config.image_min_pixels,
+        image_max_pixels=config.image_max_pixels,
     )
 
 
@@ -783,6 +810,8 @@ def _config_from_dto(dto: _WorkerConfigDto) -> DpoInferConfig:
         device_map=_worker_device_map(dto.device_map),
         gpu_ids=(),
         workers_per_gpu=1,
+        image_min_pixels=dto.image_min_pixels,
+        image_max_pixels=dto.image_max_pixels,
     )
 
 

@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .imaging import IMAGE_PREPROCESS_PROFILE, validate_image_pixel_bounds
+
 
 class InferCacheError(RuntimeError):
     """Inference resume state is malformed, conflicting, or unsafe to reuse."""
@@ -280,7 +282,14 @@ def build_infer_fingerprint(
     dataset_key: str,
     dataset_name: str,
     rows: Iterable[Mapping[str, Any]],
+    *,
+    image_min_pixels: int | None = None,
+    image_max_pixels: int | None = None,
 ) -> str:
+    image_min_pixels, image_max_pixels = validate_image_pixel_bounds(
+        image_min_pixels,
+        image_max_pixels,
+    )
     input_digest = hashlib.sha256()
     for row in rows:
         encoded = json.dumps(
@@ -296,6 +305,12 @@ def build_infer_fingerprint(
         "dataset_name": str(dataset_name),
         "input_digest": input_digest.hexdigest(),
     }
+    if image_min_pixels is not None:
+        payload["image_preprocess"] = {
+            "profile": IMAGE_PREPROCESS_PROFILE,
+            "min_pixels": image_min_pixels,
+            "max_pixels": image_max_pixels,
+        }
     encoded_payload = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")

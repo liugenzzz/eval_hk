@@ -11,6 +11,8 @@
       "vqa": "prompts/infer_vqa_raw.txt"
     },
     "max_new_tokens": 1024,
+    "image_min_pixels": 65536,
+    "image_max_pixels": 589824,
     "batch_size": 1,
     "torch_dtype": "auto",
     "device_map": "auto",

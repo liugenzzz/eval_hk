@@ -454,6 +454,83 @@ def test_infer_fp_is_stable_when_only_workers_per_gpu_changes(tmp_path):
     )
 
 
+def test_infer_fp_adds_image_preprocess_identity_only_when_enabled(
+    tmp_path, monkeypatch
+):
+    import eval_tool.dpo_cache as dpo_cache
+
+    summary, candidate, asset, config = _identity_fixture(tmp_path)
+    captured = []
+    real_build_phase_fp = dpo_cache.build_phase_fp
+
+    def recording_build_phase_fp(phase, common_identity, expected_keys):
+        captured.append(common_identity)
+        return real_build_phase_fp(phase, common_identity, expected_keys)
+
+    monkeypatch.setattr(dpo_cache, "build_phase_fp", recording_build_phase_fp)
+    arguments = ((summary,), (candidate,), {asset.ref.resolved: asset})
+
+    legacy = dpo_cache.build_dpo_inference_fp(
+        *arguments,
+        config,
+        {"id": "a"},
+    )
+    configured = dpo_cache.build_dpo_inference_fp(
+        *arguments,
+        replace(
+            config,
+            image_min_pixels=65_536,
+            image_max_pixels=589_824,
+        ),
+        {"id": "a"},
+    )
+
+    legacy_model = {
+        "model_name": config.model_name,
+        "model_path": str(config.model_path),
+        "enable_thinking": config.enable_thinking,
+        "max_new_tokens": config.max_new_tokens,
+        "batch_size": config.batch_size,
+        "torch_dtype": config.torch_dtype,
+        "device_map": config.device_map,
+        "gpu_ids": list(config.gpu_ids),
+    }
+    assert captured[0]["model"] == legacy_model
+    assert captured[1]["model"] == {
+        **legacy_model,
+        "image_preprocess": {
+            "profile": "llamafactory-0.9.5-qwen-static-v1",
+            "min_pixels": 65_536,
+            "max_pixels": 589_824,
+        },
+    }
+    assert configured != legacy
+
+
+def test_infer_fp_validates_programmatic_image_pixel_bounds(tmp_path):
+    from eval_tool.dpo_cache import build_dpo_inference_fp
+
+    summary, candidate, asset, config = _identity_fixture(tmp_path)
+    arguments = ((summary,), (candidate,), {asset.ref.resolved: asset})
+
+    with pytest.raises(ValueError, match="provided together"):
+        build_dpo_inference_fp(
+            *arguments,
+            replace(config, image_min_pixels=65_536),
+            {"id": "a"},
+        )
+    with pytest.raises(ValueError, match="image_min_pixels.*<=.*image_max_pixels"):
+        build_dpo_inference_fp(
+            *arguments,
+            replace(
+                config,
+                image_min_pixels=589_824,
+                image_max_pixels=65_536,
+            ),
+            {"id": "a"},
+        )
+
+
 def test_checkpoint_identity_uses_config_hash_and_weight_name_size_mtime_ns(tmp_path):
     from eval_tool.dpo_cache import checkpoint_identity
 

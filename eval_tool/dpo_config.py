@@ -5,9 +5,10 @@ import math
 import re
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
-from typing import Callable, Literal, Sequence, TypeVar
+from typing import Callable, Literal, Optional, Sequence, TypeVar
 
 from .config import ConfigError
+from .imaging import validate_image_pixel_bounds
 from .judge import JudgeSettings
 
 
@@ -29,6 +30,8 @@ class DpoInferConfig:
     device_map: str = "auto"
     gpu_ids: tuple[int, ...] = ()
     workers_per_gpu: int = 1
+    image_min_pixels: Optional[int] = None
+    image_max_pixels: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -72,6 +75,8 @@ _INFER_KEYS = {
     "device_map",
     "gpu_ids",
     "workers_per_gpu",
+    "image_min_pixels",
+    "image_max_pixels",
 }
 _JUDGE_KEYS = {
     "api_base",
@@ -338,6 +343,18 @@ def _load_infer(value: object, base_dir: Path) -> DpoInferConfig:
         value.get("device_map", "auto"), "infer.device_map"
     )
     gpu_ids = _gpu_ids(value.get("gpu_ids", []))
+    if ("image_min_pixels" in value) != ("image_max_pixels" in value):
+        raise DpoConfigError(
+            "infer.image_min_pixels and image_max_pixels must be provided "
+            "together or both be omitted"
+        )
+    try:
+        image_min_pixels, image_max_pixels = validate_image_pixel_bounds(
+            value.get("image_min_pixels"),
+            value.get("image_max_pixels"),
+        )
+    except ValueError as exc:
+        raise DpoConfigError(f"infer.{exc}") from exc
     if gpu_ids:
         physical_numbers = re.findall(r"cuda\s*:\s*(\d+)", device_map.casefold())
         if any(number != "0" for number in physical_numbers):
@@ -355,6 +372,8 @@ def _load_infer(value: object, base_dir: Path) -> DpoInferConfig:
         device_map=device_map,
         gpu_ids=gpu_ids,
         workers_per_gpu=workers_per_gpu,
+        image_min_pixels=image_min_pixels,
+        image_max_pixels=image_max_pixels,
     )
 
 

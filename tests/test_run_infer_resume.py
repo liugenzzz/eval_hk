@@ -145,6 +145,22 @@ def test_prompt_fingerprint_change_requires_explicit_overwrite(tmp_path):
     assert explicit_generator.prompts == ["changed q0", "changed q1", "changed q2"]
 
 
+def test_image_pixel_bounds_change_requires_explicit_overwrite(tmp_path):
+    config = _resume_config(
+        tmp_path,
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+    run(config, generator=RecordingBatchGenerator())
+
+    changed = replace(config, image_max_pixels=786_432)
+    blocked_generator = RecordingBatchGenerator()
+    with pytest.raises(RuntimeError, match="--overwrite"):
+        run(changed, generator=blocked_generator)
+
+    assert blocked_generator.prompts == []
+
+
 def test_stale_current_fingerprint_shards_cannot_bypass_manifest_conflict(tmp_path):
     prompt_path = tmp_path / "prompt.txt"
     prompt_path.write_text("prompt-a {question}", encoding="utf-8")
@@ -452,6 +468,41 @@ def test_parallel_failure_keeps_completed_worker_shard_without_final(tmp_path, m
     output = pd.read_excel(written["vqa"], dtype={"index": str})
     assert output["index"].tolist() == ["0", "1", "2"]
     assert output["prediction"].notna().all()
+
+
+def test_resume_parallel_worker_receives_image_pixel_bounds(tmp_path, monkeypatch):
+    config = replace(
+        _resume_config(tmp_path),
+        gpu_ids=[4],
+        image_min_pixels=65_536,
+        image_max_pixels=589_824,
+    )
+    constructed = []
+
+    def construct_generator(**kwargs):
+        constructed.append(kwargs)
+        return RecordingBatchGenerator()
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "before-test")
+    monkeypatch.setattr("eval_tool.run_infer.QwenVLGenerator", construct_generator)
+    monkeypatch.setattr("eval_tool.run_infer.ProcessPoolExecutor", ImmediateExecutor)
+    monkeypatch.setattr("eval_tool.run_infer.as_completed", lambda futures: futures)
+    monkeypatch.setattr(
+        "eval_tool.run_infer._progress", lambda iterable, **kwargs: iterable
+    )
+
+    run(config)
+
+    assert constructed == [
+        {
+            "model_path": config.model_path,
+            "max_new_tokens": 512,
+            "torch_dtype": "auto",
+            "device_map": "auto",
+            "image_min_pixels": 65_536,
+            "image_max_pixels": 589_824,
+        }
+    ]
 
 
 def test_parallel_short_batch_is_rejected_before_shard_or_final(tmp_path, monkeypatch):

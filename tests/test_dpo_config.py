@@ -101,6 +101,26 @@ def test_load_dpo_config_resolves_config_paths_and_cwd_image_root(tmp_path):
     )
 
 
+def test_dpo_example_explicitly_loads_training_image_pixel_bounds(tmp_path):
+    example_path = Path(__file__).parents[1] / "dpo.example.json"
+    raw = json.loads(example_path.read_text(encoding="utf-8"))
+
+    assert raw["infer"]["image_min_pixels"] == 65_536
+    assert raw["infer"]["image_max_pixels"] == 589_824
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "alpaca_train.json").write_text("[]", encoding="utf-8")
+    (tmp_path / "data" / "sharegpt_train.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "models" / "Qwen2.5-VL-7B-Instruct").mkdir(parents=True)
+    loadable_example = tmp_path / "dpo.example.json"
+    _write_json(loadable_example, raw)
+
+    config = load_dpo_config(loadable_example, invocation_dir=tmp_path)
+
+    assert config.infer.image_min_pixels == 65_536
+    assert config.infer.image_max_pixels == 589_824
+
+
 def test_explicit_image_root_resolves_from_config_directory(tmp_path):
     config_path, config_dir, raw = _write_config(tmp_path)
     (config_dir / "assets").mkdir()
@@ -215,6 +235,131 @@ def test_enable_thinking_requires_literal_json_boolean(tmp_path, value):
     _write_json(config_path, raw)
 
     with pytest.raises(DpoConfigError, match="infer.enable_thinking.*boolean"):
+        load_dpo_config(config_path, invocation_dir=tmp_path)
+
+
+def test_dpo_infer_loads_image_pixel_bounds(tmp_path):
+    config_path, _, raw = _write_config(tmp_path)
+    infer = raw["infer"]
+    assert isinstance(infer, dict)
+    infer.update(
+        {
+            "image_min_pixels": 65_536,
+            "image_max_pixels": 589_824,
+        }
+    )
+    _write_json(config_path, raw)
+
+    config = load_dpo_config(config_path, invocation_dir=tmp_path)
+
+    assert config.infer.image_min_pixels == 65_536
+    assert config.infer.image_max_pixels == 589_824
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        pytest.param({}, id="omitted"),
+        pytest.param(
+            {"image_min_pixels": None, "image_max_pixels": None},
+            id="explicit-null",
+        ),
+    ],
+)
+def test_dpo_infer_disables_image_pixel_bounds_when_omitted_or_null(
+    tmp_path, bounds
+):
+    config_path, _, raw = _write_config(tmp_path)
+    infer = raw["infer"]
+    assert isinstance(infer, dict)
+    infer.update(bounds)
+    _write_json(config_path, raw)
+
+    config = load_dpo_config(config_path, invocation_dir=tmp_path)
+
+    assert config.infer.image_min_pixels is None
+    assert config.infer.image_max_pixels is None
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        pytest.param({"image_min_pixels": 65_536}, id="missing-max"),
+        pytest.param({"image_max_pixels": 589_824}, id="missing-min"),
+        pytest.param({"image_min_pixels": None}, id="missing-max-with-null-min"),
+        pytest.param({"image_max_pixels": None}, id="missing-min-with-null-max"),
+        pytest.param(
+            {"image_min_pixels": None, "image_max_pixels": 589_824},
+            id="null-min",
+        ),
+        pytest.param(
+            {"image_min_pixels": 65_536, "image_max_pixels": None},
+            id="null-max",
+        ),
+    ],
+)
+def test_dpo_infer_rejects_single_sided_image_pixel_bounds(tmp_path, bounds):
+    config_path, _, raw = _write_config(tmp_path)
+    infer = raw["infer"]
+    assert isinstance(infer, dict)
+    infer.update(bounds)
+    _write_json(config_path, raw)
+
+    with pytest.raises(
+        DpoConfigError,
+        match=r"infer.*image_min_pixels.*image_max_pixels",
+    ):
+        load_dpo_config(config_path, invocation_dir=tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "reason"),
+    [
+        pytest.param("image_min_pixels", True, "must be an int", id="min-bool"),
+        pytest.param(
+            "image_min_pixels", 65_536.0, "must be an int", id="min-float"
+        ),
+        pytest.param(
+            "image_min_pixels", "65536", "must be an int", id="min-string"
+        ),
+        pytest.param("image_min_pixels", 0, "must be > 0", id="min-zero"),
+        pytest.param("image_min_pixels", -1, "must be > 0", id="min-negative"),
+        pytest.param("image_max_pixels", False, "must be an int", id="max-bool"),
+        pytest.param(
+            "image_max_pixels", 589_824.0, "must be an int", id="max-float"
+        ),
+        pytest.param(
+            "image_max_pixels", "589824", "must be an int", id="max-string"
+        ),
+        pytest.param("image_max_pixels", 0, "must be > 0", id="max-zero"),
+        pytest.param("image_max_pixels", -1, "must be > 0", id="max-negative"),
+    ],
+)
+def test_dpo_infer_rejects_nonpositive_or_nonstrict_image_pixel_bounds(
+    tmp_path, field, invalid, reason
+):
+    config_path, _, raw = _write_config(tmp_path)
+    infer = raw["infer"]
+    assert isinstance(infer, dict)
+    infer.update({"image_min_pixels": 65_536, "image_max_pixels": 589_824})
+    infer[field] = invalid
+    _write_json(config_path, raw)
+
+    with pytest.raises(DpoConfigError, match=rf"infer.*{field}.*{reason}"):
+        load_dpo_config(config_path, invocation_dir=tmp_path)
+
+
+def test_dpo_infer_rejects_reversed_image_pixel_bounds(tmp_path):
+    config_path, _, raw = _write_config(tmp_path)
+    infer = raw["infer"]
+    assert isinstance(infer, dict)
+    infer.update({"image_min_pixels": 589_824, "image_max_pixels": 65_536})
+    _write_json(config_path, raw)
+
+    with pytest.raises(
+        DpoConfigError,
+        match=r"infer.*image_min_pixels.*<=.*image_max_pixels",
+    ):
         load_dpo_config(config_path, invocation_dir=tmp_path)
 
 
