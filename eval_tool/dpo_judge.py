@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, Sequence, cast
 
+from tqdm import tqdm
+
 from .dpo_cache import (
     DpoJudgeParseStore,
     DpoJudgeRawStore,
@@ -383,23 +385,28 @@ def _request_pending_raw(
         future_to_item = {
             executor.submit(request_one, item): item for item in pending
         }
-        for future in as_completed(future_to_item):
-            result = future.result()
-            if result.raw_response is None:
-                errors[result.sample_id] = result
-                continue
-            # The coordinator is the only cache writer. In particular, no parser
-            # can observe this response until append succeeds and the raw phase is
-            # reloaded below.
-            raw_store.append_batch(
-                [
-                    {
-                        "sample_id": result.sample_id,
-                        "judge_request_fp": result.request_fp,
-                        "raw_response": result.raw_response,
-                    }
-                ]
-            )
+        pbar = tqdm(total=len(pending), desc="裁判打分", unit="sample")
+        try:
+            for future in as_completed(future_to_item):
+                result = future.result()
+                pbar.update(1)
+                if result.raw_response is None:
+                    errors[result.sample_id] = result
+                    continue
+                # The coordinator is the only cache writer. In particular, no parser
+                # can observe this response until append succeeds and the raw phase is
+                # reloaded below.
+                raw_store.append_batch(
+                    [
+                        {
+                            "sample_id": result.sample_id,
+                            "judge_request_fp": result.request_fp,
+                            "raw_response": result.raw_response,
+                        }
+                    ]
+                )
+        finally:
+            pbar.close()
 
 
 def _parse_raw_responses(
