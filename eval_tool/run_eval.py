@@ -9,10 +9,9 @@ from .cache import JsonlCache
 from .config import EvalConfig, load_config
 from .io import align_truth_and_prediction, image_map_from_truth, load_prediction_file, load_truth_dataset, normalize_index, read_table
 from .judge import JudgeClient
-from .metrics_text import aux_metrics
 from .report import write_reports
-from .score_mcq import score_choice_dataframe
-from .score_vqa import score_pairwise_vs_baseline, score_pointwise_vqa
+from .score_vqa import score_pairwise_vs_baseline
+from . import scorers
 
 
 def run(config: EvalConfig) -> dict[str, Path]:
@@ -58,10 +57,13 @@ def run(config: EvalConfig) -> dict[str, Path]:
             print(msg, flush=True)
             warnings.append(msg)
 
+    # 按【配置里的顺序】遍历启用的数据集，不再是写死的三元组。
+    # 写死的后果：datasets 的键名本来是自由的，但自定义键连循环都进不去，
+    # 静默被忽略；而且每加一种打分方式就要在下面多一个 elif。
+    dataset_keys = [k for k in config.datasets if k in config.enabled_datasets]
     for model in config.models:
-        for dataset_key in ("mcq", "judge", "vqa"):
-            if dataset_key not in config.enabled_datasets:
-                continue
+        for dataset_key in dataset_keys:
+            kind = config.kind_of(dataset_key)
             scored_path = model.scored_path_for(dataset_key)
             if scored_path:
                 if not Path(scored_path).exists():
@@ -73,7 +75,7 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 scored = normalize_index(read_table(scored_path))
                 scored["model"] = model.name
                 scored["dataset"] = dataset_key
-                if dataset_key == "vqa":
+                if kind == scorers.JUDGE_TEXT:
                     vqa_by_model[model.name] = scored
                 details.append(scored)
                 continue
@@ -95,24 +97,18 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 aligned.extra_predictions.to_csv(extra_path, index=False, encoding="utf-8-sig")
                 warnings.append(f"[warn] {model.name} {dataset_key}: extra predictions written to {extra_path}")
 
-            if dataset_key in {"mcq", "judge"}:
-                scored = score_choice_dataframe(data, dataset=dataset_key)
-            else:
-                if config.do_pointwise:
-                    scored = score_pointwise_vqa(
-                        data,
-                        model.name,
-                        judge_client,
-                        cache=pointwise_cache,
-                        workers=config.max_workers,
-                        image_map=image_map,
-                    )
-                else:
-                    scored = data.copy()
-                    scored["hit"] = pd.NA
-                    aux = [aux_metrics(row.get("answer", ""), row.get("prediction", "")) for _, row in scored.iterrows()]
-                    for col in ("bleu1", "bleu2", "rouge_l", "pred_len"):
-                        scored[col] = [m[col] for m in aux]
+            scored = scorers.get(kind)(
+                data,
+                scorers.ScoreContext(
+                    dataset_key=dataset_key,
+                    model_name=model.name,
+                    config=config,
+                    judge_client=judge_client,
+                    pointwise_cache=pointwise_cache,
+                    image_map=image_map,
+                ),
+            )
+            if kind == scorers.JUDGE_TEXT:
                 vqa_by_model[model.name] = scored
             details.append(scored)
 

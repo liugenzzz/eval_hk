@@ -55,6 +55,14 @@ class EvalConfig:
     seed: int = 42
     enabled_datasets: list[str] = field(default_factory=lambda: ["mcq", "judge", "vqa"])
     category_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CATEGORY_WEIGHTS))
+    # 每个数据集用哪种打分器。未声明的按键名推断（mcq/judge -> choice，
+    # 其余 -> judge_text），和重构前写死的 if/else 分支完全一致，老配置行为不变。
+    dataset_kinds: dict[str, str] = field(default_factory=dict)
+
+    def kind_of(self, dataset_key: str) -> str:
+        from .scorers import default_kind
+
+        return self.dataset_kinds.get(dataset_key) or default_kind(dataset_key)
 
 
 @dataclass(frozen=True)
@@ -127,6 +135,13 @@ class PipelineConfig:
     category_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_CATEGORY_WEIGHTS)
     )
+    # 见 EvalConfig.dataset_kinds
+    dataset_kinds: dict[str, str] = field(default_factory=dict)
+
+    def kind_of(self, dataset_key: str) -> str:
+        from .scorers import default_kind
+
+        return self.dataset_kinds.get(dataset_key) or default_kind(dataset_key)
 
     @property
     def artifacts(self) -> ArtifactLayout:
@@ -237,6 +252,34 @@ class PipelineConfig:
 
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
+
+
+def _parse_dataset_kinds(raw, datasets) -> dict[str, str]:
+    """解析 dataset_kinds。声明了哪个数据集用哪种打分器就写哪个，不写的按键名推断。
+
+    校验两件事：键必须是已声明的数据集；kind 必须是已注册的打分器 ——
+    拼错 kind 的后果是跑到一半才抛 KeyError，而那时推理已经花掉了。
+    """
+    from .scorers import registered_kinds
+
+    kinds_raw = raw.get("dataset_kinds") or raw.get("DATASET_KINDS") or {}
+    if not isinstance(kinds_raw, dict):
+        raise ConfigError("dataset_kinds must be an object")
+    kinds = {str(k): str(v) for k, v in kinds_raw.items()}
+    unknown_keys = [k for k in kinds if k not in datasets]
+    if unknown_keys:
+        raise ConfigError(
+            f"dataset_kinds 里有未声明的数据集: {','.join(sorted(unknown_keys))}"
+        )
+    known = set(registered_kinds())
+    bad = {k: v for k, v in kinds.items() if v not in known}
+    if bad:
+        raise ConfigError(
+            "dataset_kinds 里有未注册的打分器: "
+            + ", ".join(f"{k}={v}" for k, v in sorted(bad.items()))
+            + f"。已注册: {','.join(sorted(known))}"
+        )
+    return kinds
 
 
 def is_pipeline_config(path: str | Path) -> bool:
@@ -389,6 +432,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         seed=int(raw.get("seed", 42)),
         enabled_datasets=enabled_datasets,
         category_weights=category_weights,
+        dataset_kinds=_parse_dataset_kinds(raw, datasets),
     )
 
 
@@ -449,6 +493,7 @@ def load_config(path: str | Path) -> EvalConfig:
         seed=int(raw.get("seed") or raw.get("SEED") or 42),
         enabled_datasets=enabled_datasets,
         category_weights=category_weights,
+        dataset_kinds=_parse_dataset_kinds(raw, datasets),
     )
 
 
