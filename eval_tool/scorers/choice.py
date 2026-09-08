@@ -5,10 +5,11 @@ from __future__ import annotations
 import pandas as pd
 
 from ..score_mcq import score_choice_dataframe
+from ..compliance import CHOICE
 from . import CODE, ScoringContext, register
 
 
-@register("choice", engine=CODE)
+@register("choice", engine=CODE, answer_form=CHOICE)
 def score_choice(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     # 判断题的合法选项是 A/B，选择题是 A/B/C/D。历史上这件事是按数据集键名
     # ("judge") 判的，所以键名默认继续生效；新数据集应当显式写

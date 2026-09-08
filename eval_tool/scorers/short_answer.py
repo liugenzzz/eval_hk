@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..compliance import TEXT
 from . import CODE, ScoringContext, register
 
 _PUNCT = re.compile(r"[\s，。、；：！？,.;:!?\"'“”‘’()（）\[\]【】]+")
@@ -21,7 +22,7 @@ def normalize_answer(text: object) -> str:
     return _PUNCT.sub("", str(text or "")).strip().lower()
 
 
-@register("short_answer", engine=CODE)
+@register("short_answer", engine=CODE, answer_form=TEXT)
 def score_short_answer(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for _, row in data.iterrows():

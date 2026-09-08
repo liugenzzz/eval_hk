@@ -25,6 +25,7 @@ from typing import Any
 
 import pandas as pd
 
+from ..compliance import LISTING, NUMBER, YES_NO
 from ..counting import Inventory, count_bin, parse_count, parse_inventory, parse_inventory_gold
 from . import CODE, ScoringContext, register
 
@@ -56,7 +57,7 @@ def _gold_count(row: Any) -> int | None:
     return parse_count(row.get("answer", ""))
 
 
-@register("counting", engine=CODE)
+@register("counting", engine=CODE, answer_form=NUMBER)
 def score_counting(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     dense = int(ctx.params.get("dense_from", 6))
     rows: list[dict[str, Any]] = []
@@ -111,7 +112,7 @@ def score_counting(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     return _attach(data, rows)
 
 
-@register("inventory", engine=CODE)
+@register("inventory", engine=CODE, answer_form=LISTING)
 def score_inventory(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     """§7.5 清单：两层判定，**不许合成一个分**。
 
@@ -189,7 +190,7 @@ def _blank_inventory(reason: str) -> dict[str, Any]:
     }
 
 
-@register("exist_negative", engine=CODE)
+@register("exist_negative", engine=CODE, answer_form=YES_NO)
 def score_exist_negative(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     """拒答表：拒答准确率 + yes 偏置率。
 

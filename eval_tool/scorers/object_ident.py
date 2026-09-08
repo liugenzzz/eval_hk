@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 
 from ..classes import EXACT, HYPERNYM, HYPONYM, OFF_TABLE, OTHER, ClassTable, load_class_table, table_from_names
+from ..compliance import TEXT
 from . import CODE, ScoringContext, register, resolve_path
 
 
@@ -54,7 +55,7 @@ def _gold_label(row: Any, table: ClassTable) -> str:
     return found or str(row.get("answer", "") or "").strip()
 
 
-@register("object_ident", engine=CODE)
+@register("object_ident", engine=CODE, answer_form=TEXT)
 def score_object_ident(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     table = class_table_for(ctx, data)
     rows: list[dict[str, Any]] = []

@@ -6,10 +6,11 @@ import pandas as pd
 
 from ..metrics_text import aux_metrics
 from ..score_vqa import score_pointwise_vqa
+from ..compliance import TEXT
 from . import JUDGE, ScoringContext, register
 
 
-@register("judge_text", engine=JUDGE, pairwise=True)
+@register("judge_text", engine=JUDGE, pairwise=True, answer_form=TEXT)
 def score_judge_text(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     if ctx.do_pointwise:
         return score_pointwise_vqa(

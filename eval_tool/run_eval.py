@@ -7,6 +7,8 @@ import pandas as pd
 
 from . import scorers
 from .cache import JsonlCache
+from .compliance import attach_compliance
+from .scale import scale_of
 from .config import EvalConfig, load_config
 from .io import align_truth_and_prediction, image_map_from_truth, load_prediction_file, load_truth_dataset, normalize_index, read_table
 from .judge import JudgeClient
@@ -90,6 +92,7 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 scored = normalize_index(read_table(scored_path))
                 scored["model"] = model.name
                 scored["dataset"] = dataset_key
+                scored = _with_compliance(scored, spec, config, dataset_key)
                 if spec.pairwise:
                     scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
                 details.append(scored)
@@ -127,6 +130,7 @@ def run(config: EvalConfig) -> dict[str, Path]:
                     max_workers=config.max_workers,
                 ),
             )
+            scored = _with_compliance(scored, spec, config, dataset_key)
             if spec.pairwise:
                 scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
             details.append(scored)
@@ -156,6 +160,18 @@ def run(config: EvalConfig) -> dict[str, Path]:
         warn_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
         written["warnings.log"] = warn_path
     return written
+
+
+def _with_compliance(
+    scored: pd.DataFrame, spec: scorers.ScorerSpec, config: EvalConfig, dataset_key: str
+) -> pd.DataFrame:
+    """§10 的格式合规率 / 任务串味率 / 截断嫌疑对每个数据集都算。
+
+    这三个降到接近 0 是 SFT 最先体现的效果，也最能早期发现训练配置有问题 —— 只给
+    画框那几个数据集算就看不见「问描述吐坐标」这种串味。
+    """
+    scale, _ = scale_of(scored, config.params_for(dataset_key))
+    return attach_compliance(scored, spec.answer_form, scale=scale)
 
 
 def _run_pairwise(

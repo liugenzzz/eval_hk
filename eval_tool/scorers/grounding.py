@@ -36,13 +36,13 @@ from typing import Any, Mapping, Sequence
 import pandas as pd
 
 from ..bbox import Box, ParseResult, deviation, deviation_vs_object, iou, parse_boxes
+from ..compliance import BOXES
+from ..scale import scale_of
 from ..matching import match_boxes
 from . import CODE, ScoringContext, register
 
 DEFAULT_IOU_GATE = 0.5
 DEFAULT_DEV_THRESHOLD_PCT = 5.0
-DEFAULT_SCALE = 1000
-DEFAULT_ORIGIN = 0
 
 EXTRA_BOXES = "extra_boxes"      # 单框任务返回了不止一个框，取第一个
 GT_UNPARSEABLE = "gt_unparseable"
@@ -55,31 +55,6 @@ BUCKET_DEVIATION = "deviation"
 BUCKET_GT = "gt_unparseable"
 
 _POINTS = ("x1", "y1", "x2", "y2")
-
-
-def _scale_of(data: pd.DataFrame, params: Mapping[str, Any]) -> tuple[int, int]:
-    """坐标空间从数据里读，不写死 1000。
-
-    构建端把 ``bbox_scale`` / ``coordinate_mode`` 逐样本写进 metadata。全批必须一致，
-    否则 5% 的换算会静默算错 —— 一半样本按 1000 算、一半按别的算，平均出来的数
-    没有意义。所以这里发现不一致直接报错。
-    """
-    scale = int(params.get("scale") or DEFAULT_SCALE)
-    origin = int(params.get("origin") or DEFAULT_ORIGIN)
-    for column in ("meta.bbox_scale", "bbox_scale"):
-        if column not in data.columns:
-            continue
-        values = {int(v) for v in pd.Series(data[column]).dropna().tolist()}
-        if not values:
-            continue
-        if len(values) > 1:
-            raise ValueError(f"{column} 在同一批数据里有多个取值：{sorted(values)}，坐标空间必须一致")
-        found = values.pop()
-        if params.get("scale") and int(params["scale"]) != found:
-            raise ValueError(f"params.scale={params['scale']} 与数据里的 {column}={found} 不一致")
-        scale = found
-        break
-    return scale, origin
 
 
 def _thresholds(params: Mapping[str, Any]) -> tuple[float, float]:
@@ -96,9 +71,9 @@ def _empty_point_cols(prefix: str) -> dict[str, float]:
     return {f"{prefix}_{point}": math.nan for point in _POINTS}
 
 
-@register("grounding_single", engine=CODE)
+@register("grounding_single", engine=CODE, answer_form=BOXES)
 def score_grounding_single(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
-    scale, origin = _scale_of(data, ctx.params)
+    scale, origin = scale_of(data, ctx.params)
     iou_gate, dev_pct = _thresholds(ctx.params)
     threshold = dev_pct / 100.0 * scale
 
@@ -183,7 +158,7 @@ def score_grounding_single(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFr
     return _attach(data, rows)
 
 
-@register("grounding_multi", engine=CODE)
+@register("grounding_multi", engine=CODE, answer_form=BOXES)
 def score_grounding_multi(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     """多框：先按 IoU 做匈牙利匹配，再在配上的框上算偏差。
 
@@ -194,7 +169,7 @@ def score_grounding_multi(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFra
     不做 COCO 的 ``AP@[.5:.95]``：AP 需要每个框带置信度来排序，模型输出的是纯
     JSON 坐标，没有 score。硬填 1.0 算出来的 AP 是 F1 的一个变形，还多一层解释成本。
     """
-    scale, origin = _scale_of(data, ctx.params)
+    scale, origin = scale_of(data, ctx.params)
     iou_gate, dev_pct = _thresholds(ctx.params)
     threshold = dev_pct / 100.0 * scale
 

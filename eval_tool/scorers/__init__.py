@@ -66,6 +66,9 @@ class ScorerSpec:
     # 该 kind 的答案是否值得做 base vs sft 的成对裁判。有确定答案的形态
     # （选择题、坐标、类别名）pointwise 的绝对分就够了，pairwise 纯属浪费裁判调用。
     pairwise: bool = False
+    # 期待的答案形态（compliance.BOXES / NUMBER / TEXT / ...）。§10 的格式合规率和
+    # 任务串味率按它判：答的不是这一种就是串味。
+    answer_form: str = "any"
 
     @property
     def needs_judge(self) -> bool:
@@ -79,7 +82,9 @@ class UnknownKindError(KeyError):
     """数据集声明了一个没有实现的 kind。"""
 
 
-def register(kind: str, *, engine: str = CODE, pairwise: bool = False) -> Callable[[Scorer], Scorer]:
+def register(
+    kind: str, *, engine: str = CODE, pairwise: bool = False, answer_form: str = "any"
+) -> Callable[[Scorer], Scorer]:
     """把一个打分函数登记到 kind 上。重复注册直接报错，不静默覆盖。"""
 
     def decorator(fn: Scorer) -> Scorer:
@@ -87,7 +92,9 @@ def register(kind: str, *, engine: str = CODE, pairwise: bool = False) -> Callab
             raise ValueError(f"打分器 kind 重复注册：{kind}")
         if engine not in (CODE, JUDGE):
             raise ValueError(f"engine 只能是 {CODE!r} 或 {JUDGE!r}，得到 {engine!r}")
-        _REGISTRY[kind] = ScorerSpec(kind=kind, score=fn, engine=engine, pairwise=pairwise)
+        _REGISTRY[kind] = ScorerSpec(
+            kind=kind, score=fn, engine=engine, pairwise=pairwise, answer_form=answer_form
+        )
         return fn
 
     return decorator
