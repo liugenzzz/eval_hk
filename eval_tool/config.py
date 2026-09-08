@@ -37,6 +37,13 @@ class ModelConfig:
 DEFAULT_CATEGORY_WEIGHTS = {"P1": 1.0, "P2": 1.0, "P3": 1.0, "R1": 1.0, "R2": 1.0, "R3": 1.0}
 
 
+# 老配置的三个数据集键名和打分方式是一一对应的，那时 run_eval 直接按键名分支。
+# 现在打分方式由 kind 决定，但这三个键名的历史含义要保住：不写 kind 的旧配置
+# 必须还能跑。除这三个之外的任何键都必须显式声明 kind —— 猜错了会静默用错打分器，
+# 那比报错难查得多。
+DEFAULT_DATASET_KINDS = {"mcq": "choice", "judge": "choice", "vqa": "judge_text"}
+
+
 @dataclass(frozen=True)
 class EvalConfig:
     tsv_dir: Path
@@ -55,6 +62,21 @@ class EvalConfig:
     seed: int = 42
     enabled_datasets: list[str] = field(default_factory=lambda: ["mcq", "judge", "vqa"])
     category_weights: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_CATEGORY_WEIGHTS))
+    # dataset_key -> 打分器 kind / 打分器参数。留空则回落到 DEFAULT_DATASET_KINDS。
+    dataset_kinds: dict[str, str] = field(default_factory=dict)
+    dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def kind_for(self, dataset_key: str) -> str:
+        kind = self.dataset_kinds.get(dataset_key) or DEFAULT_DATASET_KINDS.get(dataset_key)
+        if not kind:
+            raise ConfigError(
+                f"datasets.{dataset_key} 没有声明 kind，也不在默认映射里。"
+                f"写成 {{\"name\": ..., \"kind\": ...}}"
+            )
+        return kind
+
+    def params_for(self, dataset_key: str) -> dict[str, Any]:
+        return dict(self.dataset_params.get(dataset_key) or {})
 
 
 @dataclass(frozen=True)
@@ -127,6 +149,8 @@ class PipelineConfig:
     category_weights: dict[str, float] = field(
         default_factory=lambda: dict(DEFAULT_CATEGORY_WEIGHTS)
     )
+    dataset_kinds: dict[str, str] = field(default_factory=dict)
+    dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def artifacts(self) -> ArtifactLayout:
@@ -233,10 +257,57 @@ class PipelineConfig:
             seed=self.seed,
             enabled_datasets=list(self.enabled_datasets),
             category_weights=dict(self.category_weights),
+            dataset_kinds=dict(self.dataset_kinds),
+            dataset_params={k: dict(v) for k, v in self.dataset_params.items()},
         )
 
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
+
+
+def parse_datasets(
+    datasets_raw: Any, *, where: str = "datasets"
+) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, Any]]]:
+    """解析 datasets 块，返回 (名称表, kind 表, 参数表)。
+
+    两种写法等价，字符串是旧写法：
+
+        "datasets": {
+          "mcq": "aero_mcq",
+          "ground": {"name": "eval_set_v1", "kind": "grounding_single",
+                     "params": {"iou_gate": 0.5}}
+        }
+
+    这里只校验形状，不校验 kind 是否已实现 —— 那是 run_eval 起跑前一次性查注册表
+    的事，配置层不该 import 打分器（会绕成循环导入，且 --help 也得付代价）。
+    """
+    if not isinstance(datasets_raw, dict) or not datasets_raw:
+        raise ConfigError(f"{where} must be a non-empty object")
+    names: dict[str, str] = {}
+    kinds: dict[str, str] = {}
+    params: dict[str, dict[str, Any]] = {}
+    for key_raw, value in datasets_raw.items():
+        key = str(key_raw).strip()
+        if not key:
+            raise ConfigError(f"{where} keys must be non-empty")
+        if isinstance(value, dict):
+            name = str(value.get("name", "")).strip()
+            kind = str(value.get("kind", "")).strip()
+            params_raw = value.get("params", {})
+            if params_raw is None:
+                params_raw = {}
+            if not isinstance(params_raw, dict):
+                raise ConfigError(f"{where}.{key}.params must be an object")
+            if kind:
+                kinds[key] = kind
+            if params_raw:
+                params[key] = dict(params_raw)
+        else:
+            name = str(value).strip()
+        if not name:
+            raise ConfigError(f"{where}.{key} must name a dataset")
+        names[key] = name
+    return names, kinds, params
 
 
 def is_pipeline_config(path: str | Path) -> bool:
@@ -263,12 +334,9 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     raw = _load_raw_config(config_path)
     base_dir = config_path.parent
 
-    datasets_raw = raw.get("datasets") or DEFAULT_DATASETS
-    if not isinstance(datasets_raw, dict) or not datasets_raw:
-        raise ConfigError("datasets must be a non-empty object")
-    datasets = {str(key): str(value) for key, value in datasets_raw.items()}
-    if any(not key.strip() or not value.strip() for key, value in datasets.items()):
-        raise ConfigError("datasets keys and names must be non-empty")
+    datasets, dataset_kinds, dataset_params = parse_datasets(
+        raw.get("datasets") or DEFAULT_DATASETS
+    )
 
     enabled_raw = raw.get("enabled_datasets", list(datasets))
     if not isinstance(enabled_raw, list):
@@ -373,6 +441,8 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         out_dir=_resolve_path(raw.get("out_dir") or "eval_report", base_dir),
         cache_dir=_resolve_path(raw.get("cache_dir") or "eval_cache", base_dir),
         datasets=datasets,
+        dataset_kinds=dataset_kinds,
+        dataset_params=dataset_params,
         models=models,
         baseline_model=baseline_model,
         infer=infer,
@@ -396,8 +466,8 @@ def load_config(path: str | Path) -> EvalConfig:
     path = Path(path)
     raw = _load_raw_config(path)
     base_dir = path.parent
-    datasets_raw = raw.get("datasets") or raw.get("DATASETS")
-    datasets = {str(k): str(v) for k, v in datasets_raw.items()} if datasets_raw else dict(DEFAULT_DATASETS)
+    datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
+    datasets, dataset_kinds, dataset_params = parse_datasets(datasets_raw)
     models_raw = raw.get("models") or raw.get("MODELS") or []
     models = [
         ModelConfig(
@@ -449,6 +519,8 @@ def load_config(path: str | Path) -> EvalConfig:
         seed=int(raw.get("seed") or raw.get("SEED") or 42),
         enabled_datasets=enabled_datasets,
         category_weights=category_weights,
+        dataset_kinds=dataset_kinds,
+        dataset_params=dataset_params,
     )
 
 
@@ -457,8 +529,9 @@ def load_infer_config(path: str | Path) -> InferConfig:
     raw = _load_raw_config(path)
     base_dir = path.parent
     infer_raw = raw.get("infer") or raw.get("INFER") or raw
-    datasets_raw = infer_raw.get("datasets") or infer_raw.get("DATASETS")
-    datasets = {str(k): str(v) for k, v in datasets_raw.items()} if datasets_raw else dict(DEFAULT_DATASETS)
+    datasets_raw = infer_raw.get("datasets") or infer_raw.get("DATASETS") or DEFAULT_DATASETS
+    # 推理不关心 kind，但配置文件是同一份，得认得对象写法。
+    datasets, _, _ = parse_datasets(datasets_raw, where="infer.datasets")
     prompt_files_raw = infer_raw.get("prompt_files") or infer_raw.get("PROMPT_FILES") or {}
     prompt_files = {str(k): _resolve_path(v, base_dir) for k, v in prompt_files_raw.items()}
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")

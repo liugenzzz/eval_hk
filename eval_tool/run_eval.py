@@ -5,25 +5,40 @@ from pathlib import Path
 
 import pandas as pd
 
+from . import scorers
 from .cache import JsonlCache
 from .config import EvalConfig, load_config
 from .io import align_truth_and_prediction, image_map_from_truth, load_prediction_file, load_truth_dataset, normalize_index, read_table
 from .judge import JudgeClient
-from .metrics_text import aux_metrics
 from .report import write_reports
-from .score_mcq import score_choice_dataframe
-from .score_vqa import score_pairwise_vs_baseline, score_pointwise_vqa
+from .score_vqa import score_pairwise_vs_baseline
+
+
+def _scoring_plan(config: EvalConfig) -> list[tuple[str, scorers.ScorerSpec]]:
+    """按配置顺序解析出 (数据集键, 打分器)，起跑前就把未知 kind 报出来。
+
+    以前这里是写死的 ("mcq", "judge", "vqa") 三元组循环。现在数据集想叫什么名字
+    都行，打分方式由它自己声明的 kind 决定；enabled_datasets 只做过滤。
+    kind 查不到就直接抛 —— 跑完两小时推理再发现打分器不存在，代价太大。
+    """
+    plan: list[tuple[str, scorers.ScorerSpec]] = []
+    for dataset_key in config.enabled_datasets:
+        if dataset_key not in config.datasets:
+            continue
+        plan.append((dataset_key, scorers.get(config.kind_for(dataset_key))))
+    return plan
 
 
 def run(config: EvalConfig) -> dict[str, Path]:
     config.out_dir.mkdir(parents=True, exist_ok=True)
     config.cache_dir.mkdir(parents=True, exist_ok=True)
+    plan = _scoring_plan(config)
     truth = {
-        key: load_truth_dataset(config.tsv_dir, name)
-        for key, name in config.datasets.items()
-        if key in config.enabled_datasets
+        dataset_key: load_truth_dataset(config.tsv_dir, config.datasets[dataset_key])
+        for dataset_key, _ in plan
     }
-    image_map = image_map_from_truth(truth.get("vqa", pd.DataFrame()))
+    # 图片按数据集各建一张表：不同数据集的 index 是各自编号的，合成一张会串图。
+    image_maps = {key: image_map_from_truth(frame) for key, frame in truth.items()}
     judge_client = JudgeClient(config.judge)
     # judge_fp first: it is a hash of the judge model, temperature and both prompt texts,
     # so switching rubric versions misses the cache and re-scores instead of silently
@@ -40,28 +55,30 @@ def run(config: EvalConfig) -> dict[str, Path]:
     )
     print(f"[judge] model={config.judge.model} fingerprint={config.judge.fingerprint}", flush=True)
     details: list[pd.DataFrame] = []
-    vqa_by_model: dict[str, pd.DataFrame] = {}
+    # dataset_key -> model_name -> 打过分的表，供 pairwise 取用
+    scored_by_dataset: dict[str, dict[str, pd.DataFrame]] = {}
     warnings: list[str] = []
 
-    vqa_truth = truth.get("vqa")
-    if vqa_truth is not None and not vqa_truth.empty:
+    for dataset_key, spec in plan:
+        if not spec.needs_judge:
+            continue
+        dataset_truth = truth[dataset_key]
+        image_map = image_maps[dataset_key]
         missing_idx = [
             str(row["index"])
-            for _, row in vqa_truth.iterrows()
+            for _, row in dataset_truth.iterrows()
             if str(row.get("index", "")) not in image_map
         ]
         if missing_idx:
             msg = (
-                f"[warn] vqa 真值中有 {len(missing_idx)}/{len(vqa_truth)} 行没有可用图片（image 列为空/NaN），"
+                f"[warn] {dataset_key} 真值中有 {len(missing_idx)}/{len(dataset_truth)} 行没有可用图片（image 列为空/NaN），"
                 f"这些行判分时将不带图。示例 index: {missing_idx[:10]}"
             )
             print(msg, flush=True)
             warnings.append(msg)
 
     for model in config.models:
-        for dataset_key in ("mcq", "judge", "vqa"):
-            if dataset_key not in config.enabled_datasets:
-                continue
+        for dataset_key, spec in plan:
             scored_path = model.scored_path_for(dataset_key)
             if scored_path:
                 if not Path(scored_path).exists():
@@ -73,8 +90,8 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 scored = normalize_index(read_table(scored_path))
                 scored["model"] = model.name
                 scored["dataset"] = dataset_key
-                if dataset_key == "vqa":
-                    vqa_by_model[model.name] = scored
+                if spec.pairwise:
+                    scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
                 details.append(scored)
                 continue
             pred_path = model.path_for(dataset_key)
@@ -95,50 +112,33 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 aligned.extra_predictions.to_csv(extra_path, index=False, encoding="utf-8-sig")
                 warnings.append(f"[warn] {model.name} {dataset_key}: extra predictions written to {extra_path}")
 
-            if dataset_key in {"mcq", "judge"}:
-                scored = score_choice_dataframe(data, dataset=dataset_key)
-            else:
-                if config.do_pointwise:
-                    scored = score_pointwise_vqa(
-                        data,
-                        model.name,
-                        judge_client,
-                        cache=pointwise_cache,
-                        workers=config.max_workers,
-                        image_map=image_map,
-                    )
-                else:
-                    scored = data.copy()
-                    scored["hit"] = pd.NA
-                    aux = [aux_metrics(row.get("answer", ""), row.get("prediction", "")) for _, row in scored.iterrows()]
-                    for col in ("bleu1", "bleu2", "rouge_l", "pred_len"):
-                        scored[col] = [m[col] for m in aux]
-                vqa_by_model[model.name] = scored
+            scored = spec.score(
+                data,
+                scorers.ScoringContext(
+                    dataset_key=dataset_key,
+                    kind=spec.kind,
+                    model_name=model.name,
+                    params=config.params_for(dataset_key),
+                    judge_client=judge_client,
+                    judge_cache=pointwise_cache,
+                    image_map=image_maps[dataset_key],
+                    do_pointwise=config.do_pointwise,
+                    max_workers=config.max_workers,
+                ),
+            )
+            if spec.pairwise:
+                scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
             details.append(scored)
 
-    pairwise = pd.DataFrame()
-    if config.do_pairwise and config.baseline_model in vqa_by_model and len(vqa_by_model) > 1:
-        baseline_df = vqa_by_model[config.baseline_model]
-        pairwise_frames = []
-        for model_name, model_df in vqa_by_model.items():
-            if model_name == config.baseline_model:
-                continue
-            pairwise_frames.append(
-                score_pairwise_vs_baseline(
-                    model_df,
-                    baseline_df,
-                    model_name,
-                    config.baseline_model,
-                    judge_client,
-                    cache=pairwise_cache,
-                    workers=config.max_workers,
-                    image_map=image_map,
-                )
-            )
-        if pairwise_frames:
-            pairwise = pd.concat(pairwise_frames, ignore_index=True)
-    elif config.do_pairwise:
-        warnings.append("[skip] pairwise requires baseline model and at least one non-baseline VQA result")
+    pairwise = _run_pairwise(
+        config,
+        plan,
+        scored_by_dataset,
+        image_maps,
+        judge_client,
+        pairwise_cache,
+        warnings,
+    )
 
     written = write_reports(
         config.out_dir,
@@ -155,6 +155,51 @@ def run(config: EvalConfig) -> dict[str, Path]:
         warn_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
         written["warnings.log"] = warn_path
     return written
+
+
+def _run_pairwise(
+    config: EvalConfig,
+    plan: list[tuple[str, scorers.ScorerSpec]],
+    scored_by_dataset: dict[str, dict[str, pd.DataFrame]],
+    image_maps: dict[str, dict[str, str]],
+    judge_client: JudgeClient,
+    pairwise_cache: JsonlCache,
+    warnings: list[str],
+) -> pd.DataFrame:
+    if not config.do_pairwise:
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    ran_any = False
+    for dataset_key, spec in plan:
+        if not spec.pairwise:
+            continue
+        by_model = scored_by_dataset.get(dataset_key, {})
+        if config.baseline_model not in by_model or len(by_model) < 2:
+            continue
+        ran_any = True
+        baseline_df = by_model[config.baseline_model]
+        for model_name, model_df in by_model.items():
+            if model_name == config.baseline_model:
+                continue
+            frame = score_pairwise_vs_baseline(
+                model_df,
+                baseline_df,
+                model_name,
+                config.baseline_model,
+                judge_client,
+                cache=pairwise_cache,
+                workers=config.max_workers,
+                image_map=image_maps[dataset_key],
+            )
+            # 多个数据集都做 pairwise 时，没有这一列的行是分不开的。
+            frame.insert(1, "dataset", dataset_key)
+            frames.append(frame)
+    if not ran_any:
+        warnings.append(
+            "[skip] pairwise requires a pairwise-capable dataset with the baseline model "
+            "and at least one non-baseline model scored"
+        )
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 
 def main() -> None:

@@ -19,6 +19,46 @@ python -m eval_tool all --config pipeline.json
 
 旧入口仍保留：`python -m eval_tool.run_infer --config infer_config.json`、`python -m eval_tool.run_eval --config config.json`，以及无子命令的 `python -m eval_tool --config config.json`。
 
+## 数据集 kind 与打分器注册表
+
+打分方式由数据集自己声明的 `kind` 决定，不再由数据集的键名决定。`datasets` 的值支持两种写法：
+
+```json
+"datasets": {
+  "mcq": "aero_mcq",
+  "zb_vqa":  { "name": "zb_vqa",       "kind": "judge_text" },
+  "book_tf": { "name": "book_tf",      "kind": "choice",
+               "params": { "choice_style": "judge" } },
+  "ground":  { "name": "eval_set_v1",  "kind": "grounding_single",
+               "params": { "iou_gate": 0.5 } }
+}
+```
+
+- 字符串是旧写法，等价于只写 `name`。`mcq` / `judge` / `vqa` 三个历史键名不写 `kind` 时分别回落到 `choice` / `choice` / `judge_text`，旧配置照跑。
+- **其他任何键名都必须显式声明 `kind`**。猜错打分器会静默出一份错的报表，比直接报错难查得多。
+- `kind` 未实现时在**起跑前**报错，不会先跑掉几小时推理或裁判调用。
+- `params` 传给该打分器，口径参数写在这里，不写死在代码里。
+
+已实现的 kind：
+
+| kind | engine | 说明 |
+|---|---|---|
+| `choice` | code | 选择题 / 判断题。`params.choice_style="judge"` 时按 A/B 二值判，否则 A/B/C/D。 |
+| `judge_text` | judge | 自由文本，裁判 pointwise 打分，并参与 base vs sft 的 pairwise。 |
+
+`engine` 区分「代码打分」和「裁判打分」：`engine="code"` 的打分器不调任何模型，同一份预测重跑一百遍逐位相同；`engine="judge"` 的结果带裁判噪声，只适合纵向对比。报表按这个字段区分哪些数字是可复现的硬指标。
+
+加一种新的答案形态，写一个打分函数挂到注册表上即可，`run_eval` 不需要改：
+
+```python
+# eval_tool/scorers/grounding.py
+from . import CODE, ScoringContext, register
+
+@register("grounding_single", engine=CODE)
+def score_grounding_single(data, ctx):
+    ...
+```
+
 ## 图像像素面积与训练配置对齐
 
 `infer_config.example.json`、`pipeline.example.json` 和 `dpo.example.json` 的 `infer` 块都显式配置：

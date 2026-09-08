@@ -109,6 +109,7 @@ def score_pointwise_vqa(
     workers: int = 8,
     image_map: dict[str, str] | None = None,
     progress: bool = True,
+    dataset_key: str = "vqa",
 ) -> pd.DataFrame:
     image_map = image_map or {}
     rows = data.to_dict("records")
@@ -121,8 +122,11 @@ def score_pointwise_vqa(
         if pd.isna(prediction) or str(prediction).strip() == "":
             results[idx] = {"hit": None, "judge_reason": "[missing_prediction]", **_empty_scores()}
             continue
+        # dataset_key 进缓存键：两个 judge_text 数据集的 index 可能撞号，
+        # 写死 "vqa" 会让后一个数据集读到前一个的判词。默认值保持 "vqa"，
+        # 已有缓存文件照样命中。
         key = {"judge_fp": client.settings.fingerprint, "model": model_name,
-               "dataset": "vqa", "index": idx}
+               "dataset": dataset_key, "index": idx}
         cached = cache.get(key) if cache else None
         if cached is not None:
             results[idx] = cached
@@ -146,7 +150,7 @@ def score_pointwise_vqa(
             # timeout would be frozen in as a permanent score that reruns won't fix
             if cache and not str(result.get("judge_reason", "")).startswith("[judge_error]"):
                 cache.set({"judge_fp": client.settings.fingerprint, "model": model_name,
-                           "dataset": "vqa", "index": idx}, result)
+                           "dataset": dataset_key, "index": idx}, result)
 
     hits: list[float | None] = []
     reasons: list[str] = []
