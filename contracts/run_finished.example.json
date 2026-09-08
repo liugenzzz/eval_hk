@@ -1,10 +1,10 @@
 {
   "schema_version": "1.0",
   "event": "run_finished",
-  "request_id": "qwen3vl8b_zb_sft_v3__finished",
-  "run_id": "qwen3vl8b_zb_sft_v3",
+  "request_id": "qwen3vl8b_zbv3_20260908_1430__finished",
+  "run_id": "qwen3vl8b_zbv3_20260908_1430",
   "status": "completed",
   "final_step": 2000,
-  "final_checkpoint_path": "/shared/trainspace/output/zb_v3/checkpoint-2000",
+  "final_checkpoint_path": "/mnt/si003010kcx0/mmdata/mmcode/trainspace/output/zb_v3/checkpoint-2000",
   "finished_at": "2026-09-08T20:31:00+08:00"
 }

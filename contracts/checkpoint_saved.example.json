@@ -1,24 +1,22 @@
 {
   "schema_version": "1.0",
   "event": "checkpoint_saved",
-  "request_id": "qwen3vl8b_zb_sft_v3__step600",
-  "run_id": "qwen3vl8b_zb_sft_v3",
+  "request_id": "qwen3vl8b_zbv3_20260908_1430__step600",
+  "run_id": "qwen3vl8b_zbv3_20260908_1430",
   "step": 600,
   "epoch": 1.5,
   "saved_at": "2026-09-08T12:00:00+08:00",
-  "checkpoint_path": "/shared/trainspace/output/zb_v3/checkpoint-600",
-  "base_model_path": "/shared/trainspace/model/Qwen3-VL-8B-Instruct",
+  "checkpoint_path": "/mnt/si003010kcx0/mmdata/mmcode/trainspace/output/zb_v3/checkpoint-600",
+  "base_model_path": "/mnt/si003010kcx0/mmdata/mmcode/trainspace/model/Qwen3-VL-8B-Instruct",
   "is_final": false,
   "train_meta": {
     "stage": "sft",
     "finetuning_type": "full",
+    "mix_strategy": "concat",
     "datasets": [
       { "name": "zb_equip", "samples": 12000 },
       { "name": "books", "samples": 3000 },
       { "name": "general_mix", "samples": 4500 }
-    ],
-    "total_samples": 19500,
-    "learning_rate": 1e-5,
-    "num_train_epochs": 3
+    ]
   }
 }
