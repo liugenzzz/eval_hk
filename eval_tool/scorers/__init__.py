@@ -24,6 +24,7 @@ kind 只回答「这种答案形态怎么打分」，不回答「这批数据是
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 import pandas as pd
@@ -44,6 +45,8 @@ class ScoringContext:
     kind: str
     model_name: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    # params 里的相对路径按它解析（类别表、词表、问法池都在配置旁边）
+    base_dir: Any | None = None
     # 只有 engine="judge" 的打分器会用到下面四个
     judge_client: Any | None = None
     judge_cache: Any | None = None
@@ -107,7 +110,18 @@ def known_kinds() -> tuple[str, ...]:
     return tuple(sorted(_REGISTRY))
 
 
+def resolve_path(ctx: ScoringContext, value: object) -> Path:
+    """把 params 里的路径按配置目录解析成绝对路径。"""
+    path = Path(str(value)).expanduser()
+    if path.is_absolute() or ctx.base_dir is None:
+        return path
+    return Path(ctx.base_dir) / path
+
+
 # 注册副作用靠 import 触发，放在文件末尾避免循环导入。
 from . import choice as _choice  # noqa: E402,F401
+from . import counting as _counting  # noqa: E402,F401
 from . import grounding as _grounding  # noqa: E402,F401
 from . import judge_text as _judge_text  # noqa: E402,F401
+from . import object_ident as _object_ident  # noqa: E402,F401
+from . import short_answer as _short_answer  # noqa: E402,F401

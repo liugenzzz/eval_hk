@@ -45,6 +45,32 @@ python -m eval_tool all --config pipeline.json
 |---|---|---|
 | `choice` | code | 选择题 / 判断题。`params.choice_style="judge"` 时按 A/B 二值判，否则 A/B/C/D。 |
 | `judge_text` | judge | 自由文本，裁判 pointwise 打分，并参与 base vs sft 的 pairwise。 |
+| `grounding_single` | code | 单框定位。达标率 + 定位成功率 + 四点偏差 + 有符号 bias。 |
+| `grounding_multi` | code | 多框检测。匈牙利匹配后算 P/R/F1、数量准确率与误差、框级达标率。 |
+| `object_ident` | code | 物体识别。精确 / 上位 / 下位 / 错误四档，表外词交裁判兜底。 |
+| `short_answer` | code | 短答案，归一化精确匹配，不中的交裁判兜底。 |
+| `counting` | code | 计数。精确命中率 + MAE + 偏向；`counting=="zero"` 一路并进拒答表。 |
+| `inventory` | code | 清单。类别集合 P/R/F1 与数量分开判，不合成一个分。 |
+| `exist_negative` | code | 拒答表。拒答准确率 + yes 偏置率。 |
+
+### 画框的验收指标
+
+```
+达标(单样本) = 解析出框 ∧ IoU ≥ iou_gate ∧ 四点平均偏差 / scale ≤ dev_threshold_pct
+达标率 = 达标样本数 / 全部样本数
+```
+
+默认 `iou_gate=0.5`、`dev_threshold_pct=5.0`，即「偏差不超过图幅 5%」，验收线是达标率 ≥ 75%。三条不能改的口径：
+
+- **分母是全部样本**。空输出、非 JSON、拒答一律记不达标；只在解析成功的子集上算，模型可以靠「拿不准就不输出」把分数刷上去。
+- **平均偏差前面串一道 IoU 门**。四点平均会被一个偏得很远的点摊薄，一个宽了两倍的框也能判达标。
+- **`MAE_4pt` / `bias_*` 只在定位成功的样本上算**。「定位成功率」和「成功样本上的偏差」是两个数，不许合成。
+
+不达标的拆三个桶（`fail_bucket`），加起来 = 1 − 达标率：`malformed`（格式不合规，是训练配置问题）/ `localize_fail`（框到别的目标，补指代消歧和密集场景）/ `deviation`（框对了不够准，看 `bias_*` 定方向）。
+
+`dev_mean4_pct`（图幅相对，验收用）和 `dev_obj`（目标尺寸相对）两把尺子并列报。图幅相对的 5% 在小目标上比目标本身还大，只看它会把小目标的失败盖过去，所以达标率必须按 `size_bucket` 拆开看。
+
+E 组的四档判定（`match_kind`）：`exact` 精确命中是主指标，`hypernym`（答粗）、`hyponym`（答细）各占一列**不许合成** —— 「答粗一点更安全」是退化不是能力，「答细一点」是在幻觉看不清的属性。类别表用 `params.classes_yaml` 指过去（构建端那份 347 类的 `classes.yaml` 即可，格式一致），不配就只用评估集里出现过的 label 兜底。
 
 `engine` 区分「代码打分」和「裁判打分」：`engine="code"` 的打分器不调任何模型，同一份预测重跑一百遍逐位相同；`engine="judge"` 的结果带裁判噪声，只适合纵向对比。报表按这个字段区分哪些数字是可复现的硬指标。
 

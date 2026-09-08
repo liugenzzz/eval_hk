@@ -119,6 +119,7 @@ def run(config: EvalConfig) -> dict[str, Path]:
                     kind=spec.kind,
                     model_name=model.name,
                     params=config.params_for(dataset_key),
+                    base_dir=config.base_dir,
                     judge_client=judge_client,
                     judge_cache=pointwise_cache,
                     image_map=image_maps[dataset_key],

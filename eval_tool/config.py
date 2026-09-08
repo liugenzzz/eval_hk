@@ -65,6 +65,9 @@ class EvalConfig:
     # dataset_key -> 打分器 kind / 打分器参数。留空则回落到 DEFAULT_DATASET_KINDS。
     dataset_kinds: dict[str, str] = field(default_factory=dict)
     dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # 配置文件所在目录。params 里的相对路径（类别表、词表、问法池）按它解析，
+    # 这样一份配置在哪台机器上跑都指得对。
+    base_dir: Path | None = None
 
     def kind_for(self, dataset_key: str) -> str:
         kind = self.dataset_kinds.get(dataset_key) or DEFAULT_DATASET_KINDS.get(dataset_key)
@@ -259,6 +262,7 @@ class PipelineConfig:
             category_weights=dict(self.category_weights),
             dataset_kinds=dict(self.dataset_kinds),
             dataset_params={k: dict(v) for k, v in self.dataset_params.items()},
+            base_dir=self.config_path.parent,
         )
 
 
@@ -521,6 +525,7 @@ def load_config(path: str | Path) -> EvalConfig:
         category_weights=category_weights,
         dataset_kinds=dataset_kinds,
         dataset_params=dataset_params,
+        base_dir=base_dir,
     )
 
 
