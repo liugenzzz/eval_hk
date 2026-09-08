@@ -68,7 +68,7 @@ def test_parse_datasets_rejects_broken_shapes(raw):
 
 def test_unknown_kind_names_the_kinds_that_do_exist():
     with pytest.raises(scorers.UnknownKindError) as exc:
-        scorers.get("grounding_single")
+        scorers.get("no_such_kind_v9")
     assert "judge_text" in str(exc.value)
 
 
