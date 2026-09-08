@@ -53,6 +53,33 @@ python -m eval_tool all --config pipeline.json
 | `inventory` | code | 清单。类别集合 P/R/F1 与数量分开判，不合成一个分。 |
 | `exist_negative` | code | 拒答表。拒答准确率 + yes 偏置率。 |
 
+### 评估集 test.jsonl 直读
+
+真值文件优先找 `<tsv_dir>/<name>.jsonl`，没有再回落到 `<name>.tsv`。jsonl 走评估集通路：**按轮次拆成多行**、metadata 扁平化成 `meta.*` 列、按 `select` 选取。
+
+一条 `inventory_locate` 样本三轮各答一种东西（轮 1 清单、轮 2 单框、轮 3 描述），分别落在计数、单框、描述三个组，用三个不同的打分器 —— 所以数据集配置声明自己要哪些任务的哪一轮：
+
+```json
+"ground_box": {
+  "name": "eval_set_v1", "kind": "grounding_single",
+  "params": {
+    "select": [
+      {"task_type": ["ground_appearance", "ground_full", "ground_relation",
+                     "ground_position", "ground_part", "ground_state", "ground_contrast"],
+       "turn": 1},
+      {"task_type": ["inventory_locate"], "turn": 2}
+    ],
+    "iou_gate": 0.5,
+    "dev_threshold_pct": 5.0
+  }
+}
+```
+
+- `turn` 从 **1** 开始，与需求文档「轮 1 / 轮 2 / 轮 3」的说法一致；行的 `index` 是 `<记录 id>__t<轮次>`。
+- `select` 的多条规则是**或**关系，留空表示全要。**选空了直接报错**，不返回空表 —— 静默的空表会在报表里变成一格「样本不足」，而那格实际上是配置写错了。
+- 历史轮按 gold 回放塞进 `history` 列，形状与 `convert_vqa_json` 一致，推理端不用改。
+- `params.image_root` 给了才会把图片编成 base64。代码打分器（画框、计数、识别）压根不看图，为了跑一次坐标打分把几个 G 的图读进内存没有道理；裁判打分和推理才需要。
+
 ### 画框的验收指标
 
 ```

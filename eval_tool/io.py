@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, Mapping
 
 import pandas as pd
 
@@ -52,8 +53,33 @@ def detect_prediction_column(data: pd.DataFrame) -> str:
     raise ValueError(f"Prediction file lacks a prediction column. Tried: {', '.join(PREDICTION_COLUMNS)}")
 
 
-def load_truth_dataset(tsv_dir: str | Path, dataset_name: str) -> pd.DataFrame:
-    return normalize_index(read_table(Path(tsv_dir) / f"{dataset_name}.tsv"))
+def truth_path(tsv_dir: str | Path, dataset_name: str) -> Path:
+    """真值文件：优先 ``<name>.jsonl``（评估集直读），没有再回落到 ``<name>.tsv``。"""
+    base = Path(tsv_dir)
+    jsonl = base / f"{dataset_name}.jsonl"
+    return jsonl if jsonl.exists() else base / f"{dataset_name}.tsv"
+
+
+def load_truth_dataset(
+    tsv_dir: str | Path,
+    dataset_name: str,
+    params: Mapping[str, Any] | None = None,
+) -> pd.DataFrame:
+    """读真值。jsonl 走评估集通路（按轮次拆行、metadata 扁平化、select 选取），
+    tsv 维持原样。"""
+    path = truth_path(tsv_dir, dataset_name)
+    if path.suffix.lower() == ".jsonl":
+        from .eval_set import load_eval_set
+
+        params = params or {}
+        return normalize_index(
+            load_eval_set(
+                path,
+                select=params.get("select"),
+                image_root=params.get("image_root"),
+            )
+        )
+    return normalize_index(read_table(path))
 
 
 def load_prediction_file(path: str | Path) -> pd.DataFrame:

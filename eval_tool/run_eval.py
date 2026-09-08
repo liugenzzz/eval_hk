@@ -36,7 +36,9 @@ def run(config: EvalConfig) -> dict[str, Path]:
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     plan = _scoring_plan(config)
     truth = {
-        dataset_key: load_truth_dataset(config.tsv_dir, config.datasets[dataset_key])
+        dataset_key: load_truth_dataset(
+            config.tsv_dir, config.datasets[dataset_key], config.params_for(dataset_key)
+        )
         for dataset_key, _ in plan
     }
     # 图片按数据集各建一张表：不同数据集的 index 是各自编号的，合成一张会串图。
