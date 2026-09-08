@@ -112,6 +112,35 @@ def score_grounding_single(data, ctx):
     ...
 ```
 
+## 评估集冻结与四指纹
+
+checkpoint 数量待定（看训练效果决定评几个）。正因为不定，**评估集必须冻结** —— 否则不同时间评的 checkpoint 之间没有可比性。每次 `eval` 会写 `run_fingerprint.json`，并把四个指纹盖到每一行结果上：
+
+| 指纹 | 来源 |
+|---|---|
+| `eval_set_sha` | 各数据集真值文件的 sha256 |
+| `profile_version` | 配置里的 `profile.version` |
+| `rubric_version` | judge 指纹（裁判模型 + 温度 + 两份提示词的哈希） |
+| `judge_model` | 裁判模型标识 |
+
+**硬校验：同一个数据集上，不同模型的结果指纹不一致就直接报错**，不出对比报表。最容易出事的是复用 `scored` 路径那条通路 —— 上一轮用旧 rubric 打的 base，和这一轮用新 rubric 打的 sft 放进同一张表，差值里混着口径变化，那不是模型的差别。复用文件自带的指纹不会被覆盖，否则校验就查不出来了。
+
+## 推理像素面积与训练配置的硬校验
+
+`infer` 块里写 `training` 就会在**配置加载时**硬校验，不一致直接报错：
+
+```json
+"infer": {
+  "image_min_pixels": 65536,
+  "image_max_pixels": 589824,
+  "training": { "image_min_pixels": 65536, "image_max_pixels": 589824 }
+}
+```
+
+分辨率变了，坐标虽是归一化的不会错位，但模型的空间精度会变，测出来的数字不可比 —— 而这件事在报表上完全看不出来，只会表现为「这个 checkpoint 好像差一点」。期望值从配置来，不在代码里写死常量：训练配置会变。
+
+完整的目标检测评估配置见 `det.example.json`。
+
 ## 报表：拆开看，不给单一总分
 
 `eval` 除了旧的 `report_summary.*`，还会写这几张：

@@ -72,6 +72,10 @@ class EvalConfig:
     report_dims: list[dict[str, Any]] = field(default_factory=list)
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
+    # 打分口径版本。阈值或判据改了就该动它 —— 它进指纹，口径不同的结果不许
+    # 画进同一张对比图。
+    profile_name: str = ""
+    profile_version: str = ""
 
     def kind_for(self, dataset_key: str) -> str:
         kind = self.dataset_kinds.get(dataset_key) or DEFAULT_DATASET_KINDS.get(dataset_key)
@@ -161,6 +165,8 @@ class PipelineConfig:
     report_dims: list[dict[str, Any]] = field(default_factory=list)
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
+    profile_name: str = ""
+    profile_version: str = ""
 
     @property
     def artifacts(self) -> ArtifactLayout:
@@ -273,6 +279,8 @@ class PipelineConfig:
             report_dims=[dict(d) for d in self.report_dims],
             empty_cells=dict(self.empty_cells),
             dataset_weights=dict(self.dataset_weights),
+            profile_name=self.profile_name,
+            profile_version=self.profile_version,
         )
 
 
@@ -352,6 +360,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         raw.get("datasets") or DEFAULT_DATASETS
     )
     report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
+    profile_name, profile_version = _parse_profile_block(raw)
 
     enabled_raw = raw.get("enabled_datasets", list(datasets))
     if not isinstance(enabled_raw, list):
@@ -421,6 +430,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     )
     limit_raw = infer_raw.get("limit")
     image_min_pixels, image_max_pixels = _config_image_pixel_bounds(infer_raw)
+    _assert_training_pixel_budget(infer_raw, image_min_pixels, image_max_pixels)
     infer = PipelineInferSettings(
         prompt_files=prompt_files,
         max_new_tokens=int(infer_raw.get("max_new_tokens", 512)),
@@ -461,6 +471,8 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         report_dims=report_dims,
         empty_cells=empty_cells,
         dataset_weights=dataset_weights,
+        profile_name=profile_name,
+        profile_version=profile_version,
         models=models,
         baseline_model=baseline_model,
         infer=infer,
@@ -487,6 +499,7 @@ def load_config(path: str | Path) -> EvalConfig:
     datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
     datasets, dataset_kinds, dataset_params = parse_datasets(datasets_raw)
     report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
+    profile_name, profile_version = _parse_profile_block(raw)
     models_raw = raw.get("models") or raw.get("MODELS") or []
     models = [
         ModelConfig(
@@ -544,6 +557,8 @@ def load_config(path: str | Path) -> EvalConfig:
         report_dims=report_dims,
         empty_cells=empty_cells,
         dataset_weights=dataset_weights,
+        profile_name=profile_name,
+        profile_version=profile_version,
     )
 
 
@@ -564,6 +579,7 @@ def load_infer_config(path: str | Path) -> InferConfig:
         infer_raw,
         allow_legacy_uppercase=True,
     )
+    _assert_training_pixel_budget(infer_raw, image_min_pixels, image_max_pixels)
     return InferConfig(
         model_name=str(infer_raw.get("model_name") or infer_raw.get("MODEL_NAME")),
         model_path=_resolve_path(infer_raw.get("model_path") or infer_raw.get("MODEL_PATH"), base_dir),
@@ -586,6 +602,46 @@ def load_infer_config(path: str | Path) -> InferConfig:
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
     )
+
+
+def _assert_training_pixel_budget(
+    raw: dict[str, Any], image_min_pixels: int | None, image_max_pixels: int | None
+) -> None:
+    """§18.4 像素预算硬校验：推理的像素面积必须与训练时的 LLaMAFactory 配置一致。
+
+    分辨率变了，坐标虽是归一化的不会错位，但模型的空间精度会变，测出来的数字不可比 ——
+    而这件事在报表上完全看不出来，只会表现为「这个 checkpoint 好像差一点」。
+
+        "infer": {
+          "image_min_pixels": 65536, "image_max_pixels": 589824,
+          "training": {"image_min_pixels": 65536, "image_max_pixels": 589824}
+        }
+
+    写了 training 就硬校验，不一致直接报错。训练配置会变，所以期望值从配置来，
+    不在代码里写死一组常量。
+    """
+    training = raw.get("training")
+    if training is None:
+        return
+    if not isinstance(training, dict):
+        raise ConfigError("infer.training must be an object")
+    expected_min = training.get("image_min_pixels")
+    expected_max = training.get("image_max_pixels")
+    if expected_min is None or expected_max is None:
+        raise ConfigError(
+            "infer.training 要同时给 image_min_pixels 和 image_max_pixels"
+        )
+    if image_min_pixels is None or image_max_pixels is None:
+        raise ConfigError(
+            "infer.training 声明了训练时的像素面积，但推理没设 image_min_pixels /"
+            " image_max_pixels：那等于按旧行为不做预缩放，和训练时不一致"
+        )
+    if (image_min_pixels, image_max_pixels) != (int(expected_min), int(expected_max)):
+        raise ConfigError(
+            f"推理像素面积 ({image_min_pixels}, {image_max_pixels}) 与训练配置 "
+            f"({int(expected_min)}, {int(expected_max)}) 不一致。分辨率变了模型的空间精度"
+            f"就变了，测出来的数字不可比。"
+        )
 
 
 def _config_image_pixel_bounds(
@@ -753,3 +809,19 @@ def _parse_report_block(
         dict(empty_raw),
         {str(k): float(v) for k, v in weights_raw.items()},
     )
+
+
+def _parse_profile_block(raw: dict[str, Any]) -> tuple[str, str]:
+    """profile 块只回答一个问题：这种 kind 的数据，用哪个打分器、哪版提示词。
+
+        "profile": {"name": "grounding_zh_v1", "version": "v1"}
+
+    具体的绑定写在 datasets 的 kind / params 里，这里只留名字和版本 —— 版本进指纹，
+    口径改了而版本没动，两次评估就会被当成可比的，那是最难查的一类错。
+    """
+    profile_raw = raw.get("profile") or {}
+    if not isinstance(profile_raw, dict):
+        raise ConfigError("profile must be an object")
+    name = str(profile_raw.get("name") or "")
+    version = str(profile_raw.get("version") or name)
+    return name, version

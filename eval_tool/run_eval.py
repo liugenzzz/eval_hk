@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -9,9 +10,11 @@ from . import scorers
 from .cache import JsonlCache
 from .breakdown import EmptyCells, parse_dims
 from .compliance import attach_compliance
+from .eval_set import sha256_of
+from .fingerprint import RunFingerprint, check_comparable, dataset_shas, stamp
 from .scale import scale_of
 from .config import EvalConfig, load_config
-from .io import align_truth_and_prediction, image_map_from_truth, load_prediction_file, load_truth_dataset, normalize_index, read_table
+from .io import align_truth_and_prediction, image_map_from_truth, load_prediction_file, load_truth_dataset, normalize_index, read_table, truth_path
 from .judge import JudgeClient
 from .report import write_reports
 from .score_vqa import score_pairwise_vs_baseline
@@ -44,6 +47,15 @@ def run(config: EvalConfig) -> dict[str, Path]:
     }
     # 图片按数据集各建一张表：不同数据集的 index 是各自编号的，合成一张会串图。
     image_maps = {key: image_map_from_truth(frame) for key, frame in truth.items()}
+    # §13 评估集冻结：抽样一次后固化，每份结果记下它评的是哪一批样本。
+    fingerprint = RunFingerprint(
+        eval_set_sha=dataset_shas(
+            {key: sha256_of(truth_path(config.tsv_dir, config.datasets[key])) for key, _ in plan}
+        ),
+        profile_version=config.profile_version,
+        rubric_version=config.judge.fingerprint,
+        judge_model=config.judge.model,
+    )
     judge_client = JudgeClient(config.judge)
     # judge_fp first: it is a hash of the judge model, temperature and both prompt texts,
     # so switching rubric versions misses the cache and re-scores instead of silently
@@ -96,6 +108,9 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 scored["model"] = model.name
                 scored["dataset"] = dataset_key
                 scored = _with_compliance(scored, spec, config, dataset_key)
+                # 复用的 scored 文件如果已经带指纹就保留它 —— 覆盖掉就等于把
+                # 「它是用旧口径打的」抹了，校验也就查不出来了。
+                scored = stamp(scored, fingerprint)
                 if spec.pairwise:
                     scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
                 details.append(scored)
@@ -134,9 +149,13 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 ),
             )
             scored = _with_compliance(scored, spec, config, dataset_key)
+            scored = stamp(scored, fingerprint)
             if spec.pairwise:
                 scored_by_dataset.setdefault(dataset_key, {})[model.name] = scored
             details.append(scored)
+
+    if details:
+        check_comparable(pd.concat(details, ignore_index=True))
 
     pairwise = _run_pairwise(
         config,
@@ -163,6 +182,19 @@ def run(config: EvalConfig) -> dict[str, Path]:
         dataset_engines={key: spec.engine for key, spec in plan},
         dataset_weights=config.dataset_weights,
     )
+    fingerprint_path = config.out_dir / "run_fingerprint.json"
+    fingerprint_path.write_text(
+        json.dumps(
+            {**fingerprint.to_dict(), "profile_name": config.profile_name,
+             "models": [model.name for model in config.models],
+             "datasets": {key: config.datasets[key] for key, _ in plan}},
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    written["run_fingerprint.json"] = fingerprint_path
+
     if warnings:
         warn_path = config.out_dir / "warnings.log"
         warn_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")

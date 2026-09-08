@@ -1,0 +1,149 @@
+{
+  "profile": { "name": "grounding_zh_v1", "version": "v1" },
+
+  "tsv_dir": "data/eval",
+  "work_dir": "work_dir_det",
+  "out_dir": "eval_report_det",
+  "cache_dir": "eval_cache_det",
+
+  "datasets": {
+    "ground_box": {
+      "name": "eval_set_v1",
+      "kind": "grounding_single",
+      "params": {
+        "select": [
+          { "task_type": ["ground_appearance", "ground_full", "ground_relation",
+                          "ground_position", "ground_part", "ground_state", "ground_contrast"],
+            "turn": 1 },
+          { "task_type": ["inventory_locate"], "turn": 2 }
+        ],
+        "iou_gate": 0.5,
+        "dev_threshold_pct": 5.0
+      }
+    },
+    "detect_box": {
+      "name": "eval_set_v1",
+      "kind": "grounding_multi",
+      "params": {
+        "select": [{ "task_type": ["detect_class", "detect_describe"], "turn": 1 }],
+        "iou_gate": 0.5,
+        "dev_threshold_pct": 5.0
+      }
+    },
+    "region_identify": {
+      "name": "eval_set_v1",
+      "kind": "object_ident",
+      "params": {
+        "select": [{ "task_type": ["region_identify"], "turn": 1 }],
+        "classes_yaml": "/path/on/eval/server/classes.yaml"
+      }
+    },
+    "count_class": {
+      "name": "eval_set_v1",
+      "kind": "counting",
+      "params": {
+        "select": [{ "task_type": ["count_class"], "turn": 1 },
+                   { "task_type": ["inventory_locate"], "turn": 1 }],
+        "dense_from": 6
+      }
+    },
+    "inventory": {
+      "name": "eval_set_v1",
+      "kind": "inventory",
+      "params": { "select": [{ "task_type": ["inventory_locate"], "turn": 1 }] }
+    },
+    "attribute_qa": {
+      "name": "eval_set_v1",
+      "kind": "short_answer",
+      "params": { "select": [{ "task_type": ["attribute_qa"], "turn": 1 }] }
+    },
+    "exist_negative": {
+      "name": "eval_set_v1",
+      "kind": "exist_negative",
+      "params": { "select": [{ "task_type": ["exist_negative"], "turn": 1 }] }
+    },
+    "describe": {
+      "name": "eval_set_v1",
+      "kind": "judge_text",
+      "params": {
+        "select": [
+          { "task_type": ["ground_appearance", "ground_full", "ground_relation",
+                          "ground_position", "ground_part", "ground_state", "ground_contrast"],
+            "turn": 2 },
+          { "task_type": ["detect_describe"], "turn": 2 },
+          { "task_type": ["inventory_locate"], "turn": 3 }
+        ],
+        "image_root": "/path/on/eval/server/images"
+      }
+    }
+  },
+
+  "enabled_datasets": ["ground_box", "detect_box", "region_identify", "count_class",
+                       "inventory", "attribute_qa", "exist_negative", "describe"],
+
+  "models": [
+    { "name": "base", "model_path": "models/Qwen3-VL-8B-Instruct" },
+    { "name": "sft", "model_path": "models/sft_ep2" }
+  ],
+  "baseline_model": "base",
+
+  "report": {
+    "dims": [
+      { "key": "task_type", "from": "task_type" },
+      { "key": "difficulty", "from": "meta.difficulty", "level": "group" },
+      { "key": "size_bucket", "from": "meta.size_bucket",
+        "only_kinds": ["grounding_single", "grounding_multi"] },
+      { "key": "label", "from": "meta.label", "worst_n": 20 },
+      { "key": "describe_kind", "from": "meta.describe_kind", "only_kinds": ["judge_text"] },
+      { "key": "count_bin", "from": "meta.count", "only_kinds": ["counting"],
+        "bins": [[1, 1, "单例"], [2, 5, "少量"], [6, null, "密集"]] },
+      { "key": "counting", "from": "meta.counting", "only_kinds": ["counting"] }
+    ],
+    "empty_cells": {
+      "by_design": [["ground_part", "hard"], ["ground_contrast", "hard"]],
+      "not_in_data": ["ground_unique", "spatial_relation"]
+    },
+    "dataset_weights": {
+      "ground_box": 0.40,
+      "detect_box": 0.20,
+      "region_identify": 0.25,
+      "count_class": 0.10,
+      "attribute_qa": 0.05,
+      "inventory": 0.0,
+      "exist_negative": 0.0
+    }
+  },
+
+  "infer": {
+    "prompt_files": {},
+    "max_new_tokens": 1024,
+    "image_min_pixels": 65536,
+    "image_max_pixels": 589824,
+    "training": { "image_min_pixels": 65536, "image_max_pixels": 589824 },
+    "batch_size": 1,
+    "gpu_ids": [],
+    "workers_per_gpu": 1,
+    "torch_dtype": "auto",
+    "device_map": "auto"
+  },
+
+  "judge": {
+    "api_base": "http://127.0.0.1:18180/v1/chat/completions",
+    "api_key": "sk-local",
+    "model": "qwen3.6-27b",
+    "temperature": 0.0,
+    "timeout": 120,
+    "max_retries": 3,
+    "prompt_files": {
+      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
+      "pairwise": "prompts/judge_equip_pairwise.txt"
+    }
+  },
+
+  "max_workers": 8,
+  "do_pointwise": true,
+  "do_pairwise": true,
+  "do_length_control": false,
+  "bootstrap_n": 1000,
+  "seed": 42
+}
