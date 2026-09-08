@@ -19,6 +19,7 @@ from .breakdown import (
     DimSpec,
     default_dims,
     make_breakdown,
+    make_chain_decay,
     make_failure_buckets,
     make_weighted_total,
     parse_dims,
@@ -52,6 +53,7 @@ def write_reports(
     dataset_kinds: dict[str, str] | None = None,
     dataset_engines: dict[str, str] | None = None,
     dataset_weights: dict[str, float] | None = None,
+    chain_decay_pairs: list[dict[str, str]] | None = None,
 ) -> dict[str, Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -97,6 +99,7 @@ def write_reports(
                 dataset_kinds=dataset_kinds,
                 dataset_engines=dataset_engines,
                 dataset_weights=dataset_weights,
+                chain_decay_pairs=chain_decay_pairs,
             )
         )
 
@@ -183,6 +186,7 @@ def _write_breakdowns(
     dataset_kinds: dict[str, str] | None,
     dataset_engines: dict[str, str] | None,
     dataset_weights: dict[str, float] | None,
+    chain_decay_pairs: list[dict[str, str]] | None = None,
 ) -> dict[str, Path]:
     """§17 的拆分表、§16.2 的配对区间、验收总分。
 
@@ -217,6 +221,13 @@ def _write_breakdowns(
             path = out / "acceptance_score.csv"
             total.to_csv(path, index=False, encoding="utf-8-sig")
             written["acceptance_score.csv"] = path
+
+    if chain_decay_pairs:
+        decay = make_chain_decay(all_details, chain_decay_pairs)
+        if not decay.empty:
+            path = out / "chain_decay.csv"
+            decay.to_csv(path, index=False, encoding="utf-8-sig")
+            written["chain_decay.csv"] = path
 
     paired_frames = [
         summarize_paired_diff(all_details, baseline_model, metric_col=metric,

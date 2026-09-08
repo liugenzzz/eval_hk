@@ -72,6 +72,8 @@ class EvalConfig:
     report_dims: list[dict[str, Any]] = field(default_factory=list)
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
+    # 链路衰减率的数据集配对：[{"gold": "describe", "model": "describe_modelhist"}]
+    chain_decay_pairs: list[dict[str, str]] = field(default_factory=list)
     # 打分口径版本。阈值或判据改了就该动它 —— 它进指纹，口径不同的结果不许
     # 画进同一张对比图。
     profile_name: str = ""
@@ -165,6 +167,7 @@ class PipelineConfig:
     report_dims: list[dict[str, Any]] = field(default_factory=list)
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
+    chain_decay_pairs: list[dict[str, str]] = field(default_factory=list)
     profile_name: str = ""
     profile_version: str = ""
 
@@ -279,6 +282,7 @@ class PipelineConfig:
             report_dims=[dict(d) for d in self.report_dims],
             empty_cells=dict(self.empty_cells),
             dataset_weights=dict(self.dataset_weights),
+            chain_decay_pairs=[dict(p) for p in self.chain_decay_pairs],
             profile_name=self.profile_name,
             profile_version=self.profile_version,
         )
@@ -359,7 +363,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     datasets, dataset_kinds, dataset_params = parse_datasets(
         raw.get("datasets") or DEFAULT_DATASETS
     )
-    report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
+    report_dims, empty_cells, dataset_weights, chain_decay_pairs = _parse_report_block(raw)
     profile_name, profile_version = _parse_profile_block(raw)
 
     enabled_raw = raw.get("enabled_datasets", list(datasets))
@@ -471,6 +475,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         report_dims=report_dims,
         empty_cells=empty_cells,
         dataset_weights=dataset_weights,
+        chain_decay_pairs=chain_decay_pairs,
         profile_name=profile_name,
         profile_version=profile_version,
         models=models,
@@ -498,7 +503,7 @@ def load_config(path: str | Path) -> EvalConfig:
     base_dir = path.parent
     datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
     datasets, dataset_kinds, dataset_params = parse_datasets(datasets_raw)
-    report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
+    report_dims, empty_cells, dataset_weights, chain_decay_pairs = _parse_report_block(raw)
     profile_name, profile_version = _parse_profile_block(raw)
     models_raw = raw.get("models") or raw.get("MODELS") or []
     models = [
@@ -557,6 +562,7 @@ def load_config(path: str | Path) -> EvalConfig:
         report_dims=report_dims,
         empty_cells=empty_cells,
         dataset_weights=dataset_weights,
+        chain_decay_pairs=chain_decay_pairs,
         profile_name=profile_name,
         profile_version=profile_version,
     )
@@ -782,7 +788,7 @@ def _pipeline_judge_settings(value: object, base_dir: Path) -> JudgeSettings:
 
 def _parse_report_block(
     raw: dict[str, Any]
-) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float], list[dict[str, str]]]:
     """report 块：拆分维度、显式声明的空格子、验收总分的数据集权重。
 
         "report": {
@@ -804,10 +810,17 @@ def _parse_report_block(
     weights_raw = report_raw.get("dataset_weights") or {}
     if not isinstance(weights_raw, dict):
         raise ConfigError("report.dataset_weights must be an object")
+    decay_raw = report_raw.get("chain_decay") or []
+    if not isinstance(decay_raw, list):
+        raise ConfigError("report.chain_decay must be a list")
+    for entry in decay_raw:
+        if not isinstance(entry, dict) or not entry.get("gold") or not entry.get("model"):
+            raise ConfigError('report.chain_decay entries need {"gold": ..., "model": ...}')
     return (
         [dict(item) for item in dims_raw],
         dict(empty_raw),
         {str(k): float(v) for k, v in weights_raw.items()},
+        [{"gold": str(e["gold"]), "model": str(e["model"])} for e in decay_raw],
     )
 
 

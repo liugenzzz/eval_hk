@@ -53,6 +53,7 @@ python -m eval_tool all --config pipeline.json
 | `inventory` | code | 清单。类别集合 P/R/F1 与数量分开判，不合成一个分。 |
 | `exist_negative` | code | 拒答表。拒答准确率 + yes 偏置率。 |
 | `describe` | judge | D 组自由描述。代码判范围合规 / CHAIR / 空话，裁判判正确性 / 落地性 / 信息量。 |
+| `perturbation` | code | 问法扰动。按组算三次输出之间的 IoU 一致率和四点方差。 |
 
 ### D 组描述：代码判和裁判判的分工
 
@@ -137,6 +138,62 @@ from . import CODE, ScoringContext, register
 def score_grounding_single(data, ctx):
     ...
 ```
+
+## 派生评估集：模型历史、双向一致性、问法扰动
+
+这三件事都需要「拿模型自己的输出再问一遍」。实现上**不改推理引擎** —— 装备和书籍走的是同一条 `run_infer`，里面有 manifest 指纹、`_partial/*.jsonl` 分片、`InferenceLock`、并行 worker 的索引合并，改坏了不是报错，是几小时的 GPU 跑到一半续不上。
+
+改成生成一份新的 jsonl，然后当普通数据集跑：
+
+```
+① infer(ground_box)                        现有通路，一行不改
+② derive → describe_modelhist.jsonl        纯函数，不需要 GPU，可单测
+③ infer(describe_modelhist)                现有通路，一行不改
+④ 报表层比 ① 和 ③ → chain_decay.csv
+```
+
+每份派生集有自己的 sha256 和推理指纹，断点续传、缓存、重跑全部免费继承。
+
+```bash
+# 阶段 5：模型历史（链路衰减率。第 1 轮只跑一次，gold 和 model 历史共用它的结果）
+python -m eval_tool derive --mode model-history \
+  --eval-set data/eval/eval_set_v1.jsonl \
+  --pred work_dir_det/sft/sft_eval_set_v1.xlsx \
+  --sample-ratio 0.3 \
+  --out data/eval/describe_modelhist.jsonl
+
+# 阶段 9.1：双向一致性（正向的框拿来反问「这个框里是什么」）
+python -m eval_tool derive --mode reverse-consistency \
+  --eval-set data/eval/eval_set_v1.jsonl \
+  --pred work_dir_det/sft/sft_eval_set_v1.xlsx \
+  --pool region_identify=<构建端>/prompts/region_identify/region_identify.txt \
+  --tasks ground_appearance,ground_full,ground_relation \
+  --out data/eval/reverse_consistency.jsonl
+
+# 阶段 9.2：问法扰动（同一个目标，问法池里换 3 种说法）
+python -m eval_tool derive --mode question-perturbation \
+  --eval-set data/eval/eval_set_v1.jsonl \
+  --pool ground_appearance=<构建端>/prompts/ground_attribute/ground_attribute.txt \
+  --variants 3 --sample-ratio 0.15 \
+  --out data/eval/question_perturbation.jsonl
+```
+
+几条口径：
+
+- **抽样按 id 哈希，不用 `random.sample`**。评估集加一条样本、记录顺序变了，抽中的那一批也不该跟着变 —— 否则两个 checkpoint 的链路衰减率算在不同的子集上，没法比。
+- **链路衰减率按 `derived_from` 对齐再算**。model 那一路只跑 30%，直接比两个均值等于拿不同的两批样本相减，抽样子集碰巧偏难衰减率就凭空多出一截。
+- **模型历史缺哪一轮的预测就整条跳过**：用 gold 补一半、model 补一半算出来的衰减率，分子分母不是同一件事。
+- **双向一致性不按正向对错筛样本**。正向框错时反向答「卡车」对那个框来说是对的，但和原来的指代对不上 —— 那恰恰是要测的失败模式。正向 IoU 照样记进 metadata，报表可以拆「两边都对」和「反向一致但正向框错」。正向根本没框出来的才丢掉（已经被格式合规率记过一次，再记一次是重复惩罚）。
+- **问法扰动一个组出一行**，不是一个变体出一行：一致性是组的属性，按变体行平均等于把同一个组数了三遍。凑不满 `--variants` 条不同问法就整条不做——两个变体和三个变体算出来的方差不是同一个量。
+- 扰动组里能解析的框少于 2 个时记 NA 不记 0：「换个说法就不输出坐标了」是格式合规率的事，在这里记 0 等于罚两次。
+
+链路衰减率的读法（`chain_decay.csv`）：
+
+| 现象 | 结论 |
+|---|---|
+| 衰减大 | 瓶颈在**定位** —— 框错了描述再好也白搭，补定位数据 |
+| 衰减小但 `gold_score` 本身低 | 瓶颈在**描述** —— 补描述数据 |
+| 两个都高 | 这一轮 SFT 成了 |
 
 ## 评估集冻结与四指纹
 

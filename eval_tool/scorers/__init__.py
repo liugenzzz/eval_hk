@@ -132,4 +132,5 @@ from . import describe as _describe  # noqa: E402,F401
 from . import grounding as _grounding  # noqa: E402,F401
 from . import judge_text as _judge_text  # noqa: E402,F401
 from . import object_ident as _object_ident  # noqa: E402,F401
+from . import perturbation as _perturbation  # noqa: E402,F401
 from . import short_answer as _short_answer  # noqa: E402,F401

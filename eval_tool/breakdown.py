@@ -317,3 +317,82 @@ def default_dims() -> list[DimSpec]:
             {"key": "counting", "from": "meta.counting", "only_kinds": ["counting"]},
         ]
     )
+
+
+def make_chain_decay(
+    details: pd.DataFrame,
+    pairs: Sequence[Mapping[str, str]],
+    metric_col: str = "hit",
+    min_n: int = MIN_N_FOR_CONCLUSION,
+) -> pd.DataFrame:
+    """§8.2 链路衰减率 = (D_gold 得分 − D_model 得分) / D_gold 得分。
+
+    这是「专项训练该补哪边」的直接依据：
+
+    ==================  ====================================================
+    衰减大               瓶颈在**定位** —— 框错了描述再好也白搭，补定位数据
+    衰减小但 D_gold 低    瓶颈在**描述** —— 补描述数据
+    两个都高             这一轮 SFT 成了
+    ==================  ====================================================
+
+    ``pairs`` 形如 ``[{"gold": "describe", "model": "describe_modelhist"}]``。
+    model 那一路只跑 30% 抽样，所以两边的 n 不一样是正常的；但**要在同一批样本上比**，
+    所以这里按 ``derived_from`` 对齐，只用两边都有的那些样本算。
+    """
+    if details.empty or metric_col not in details.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for pair in pairs:
+        gold_key, model_key = str(pair.get("gold", "")), str(pair.get("model", ""))
+        gold_all = details[details["dataset"] == gold_key]
+        model_all = details[details["dataset"] == model_key]
+        if gold_all.empty or model_all.empty:
+            continue
+        for model_name in sorted(set(gold_all["model"]) & set(model_all["model"])):
+            gold = gold_all[gold_all["model"] == model_name]
+            model_hist = model_all[model_all["model"] == model_name]
+            gold, model_hist = _align_on_source(gold, model_hist)
+            gold_values = pd.to_numeric(gold[metric_col], errors="coerce").dropna()
+            model_values = pd.to_numeric(model_hist[metric_col], errors="coerce").dropna()
+            if not len(gold_values) or not len(model_values):
+                continue
+            gold_score = float(gold_values.mean())
+            model_score = float(model_values.mean())
+            decay = (gold_score - model_score) / gold_score if gold_score else math.nan
+            rows.append({
+                "model": model_name,
+                "gold_dataset": gold_key,
+                "model_dataset": model_key,
+                "metric": metric_col,
+                "gold_score": round(gold_score, 4),
+                "model_history_score": round(model_score, 4),
+                "chain_decay": round(decay, 4) if not math.isnan(decay) else math.nan,
+                "n_gold": int(len(gold_values)),
+                "n_model_history": int(len(model_values)),
+                # n 太小就别下结论 —— 衰减率是两个均值相除，n 小的时候它比任何一个
+                # 均值都不稳。
+                "status": OK if min(len(gold_values), len(model_values)) >= min_n else INSUFFICIENT,
+            })
+    return pd.DataFrame(rows)
+
+
+def _align_on_source(gold: pd.DataFrame, model_hist: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """把两边收敛到同一批原始样本上。
+
+    model 历史那一路只跑 30% 抽样，直接比两个均值等于拿不同的两批样本相减 —— 抽样
+    子集碰巧偏难，衰减率就凭空多出一截。派生集的每条都带 ``meta.derived_from``
+    指回原始记录 id，主线那边是 ``sample_id``，按这两列取交集。
+
+    对不上（缺列）时原样返回：这时候的衰减率只是个粗略值，n 会如实报出来。
+    """
+    source_col = next((c for c in ("meta.derived_from", "derived_from") if c in model_hist.columns), None)
+    gold_col = "sample_id" if "sample_id" in gold.columns else None
+    if source_col is None or gold_col is None:
+        return gold, model_hist
+    shared = set(model_hist[source_col].dropna().astype(str)) & set(gold[gold_col].dropna().astype(str))
+    if not shared:
+        return gold, model_hist
+    return (
+        gold[gold[gold_col].astype(str).isin(shared)],
+        model_hist[model_hist[source_col].astype(str).isin(shared)],
+    )

@@ -15,7 +15,16 @@ from .config import (
     load_infer_config,
     load_pipeline_config,
 )
+from .derive import (
+    derive_model_history,
+    derive_question_perturbation,
+    derive_reverse_consistency,
+    load_predictions,
+    write_jsonl,
+)
 from .dpo_config import load_dpo_config
+from .eval_set import load_records as load_eval_records
+from .phrase_pool import PhrasePool
 from .dpo_pipeline import DpoPipelineError, run_build_dpo
 from .pipeline import (
     PipelineError,
@@ -30,7 +39,7 @@ from .run_eval import run as run_eval_stage
 from .run_infer import run as run_infer_stage
 
 
-SUBCOMMANDS = {"convert", "infer", "eval", "sweep", "all", "build-dpo"}
+SUBCOMMANDS = {"convert", "infer", "eval", "sweep", "all", "build-dpo", "derive"}
 
 
 def _model_names(value: str) -> list[str]:
@@ -86,6 +95,31 @@ def build_parser() -> argparse.ArgumentParser:
     all_command.add_argument("--overwrite", action="store_true")
     all_command.add_argument("--clean-partial", action="store_true")
     all_command.add_argument("--rubric")
+
+    derive = subparsers.add_parser(
+        "derive",
+        help="Derive a follow-up eval set from a model's own predictions "
+             "(model history / reverse consistency / question perturbation)",
+    )
+    derive.add_argument("--eval-set", required=True, help="原始评估集 jsonl")
+    derive.add_argument("--out", required=True, help="派生集写到哪里（jsonl）")
+    derive.add_argument(
+        "--mode", required=True,
+        choices=["model-history", "reverse-consistency", "question-perturbation"],
+    )
+    derive.add_argument(
+        "--pred", dest="preds", action="append", default=[],
+        help="模型预测文件；可重复（拼模型历史要多轮的预测，分散在多个数据集里）",
+    )
+    derive.add_argument("--pool", dest="pools", action="append", default=[],
+                        help="问法池，形如 task=path 或 default=path；可重复")
+    derive.add_argument("--sample-ratio", type=float, default=1.0,
+                        help="确定性抽样比例（链路衰减率是统计量，默认那一档是 0.3）")
+    derive.add_argument("--variants", type=int, default=3)
+    derive.add_argument("--tasks", help="逗号分隔，只对这些 task_type 派生")
+    derive.add_argument("--target-turn", dest="target_turns", action="append", default=[],
+                        help="形如 inventory_locate=3；不写就取每条的最后一轮")
+    derive.add_argument("--scale", type=int, default=1000)
 
     build_dpo = subparsers.add_parser(
         "build-dpo", help="Build a DPO dataset directly from JSON/JSONL"
@@ -231,6 +265,72 @@ def _handle_build_dpo(args: argparse.Namespace) -> Any:
     )
 
 
+def _key_value_pairs(items: list[str], what: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in items:
+        key, sep, value = str(item).partition("=")
+        if not sep or not key.strip() or not value.strip():
+            raise ConfigError(f"{what} 要写成 key=value，得到：{item}")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def _handle_derive(args: argparse.Namespace) -> Path:
+    """派生集：读原始评估集 + 模型自己的预测，产出一份新的 jsonl。
+
+    这一步是纯函数，不需要 GPU，也不碰推理引擎 —— 产出的 jsonl 当成普通数据集再跑
+    一次 infer 即可，断点续传和缓存全部免费继承。
+    """
+    records = load_eval_records(args.eval_set)
+    tasks = [t.strip() for t in str(args.tasks).split(",")] if args.tasks else None
+
+    if args.mode == "model-history":
+        if not args.preds:
+            raise ConfigError("model-history 需要 --pred（前面几轮的模型预测）")
+        target_turns = {k: int(v) for k, v in _key_value_pairs(args.target_turns, "--target-turn").items()}
+        derived = derive_model_history(
+            records,
+            load_predictions(args.preds),
+            target_turns=target_turns,
+            sample_ratio=args.sample_ratio,
+        )
+    elif args.mode == "reverse-consistency":
+        if not args.preds:
+            raise ConfigError("reverse-consistency 需要 --pred（正向那一轮的框）")
+        pools = _key_value_pairs(args.pools, "--pool")
+        pool_path = pools.get("region_identify") or pools.get("default")
+        if not pool_path:
+            raise ConfigError("reverse-consistency 需要 --pool region_identify=<问法池文件>")
+        derived = derive_reverse_consistency(
+            records,
+            load_predictions(args.preds),
+            question_pool=PhrasePool.load(pool_path),
+            scale=args.scale,
+            tasks=tasks,
+        )
+    else:
+        pools = {k: PhrasePool.load(v) for k, v in _key_value_pairs(args.pools, "--pool").items()}
+        if not pools:
+            raise ConfigError("question-perturbation 需要至少一个 --pool")
+        derived = derive_question_perturbation(
+            records,
+            pools=pools,
+            variants=args.variants,
+            sample_ratio=args.sample_ratio,
+            tasks=tasks,
+        )
+
+    if not derived:
+        raise ConfigError(
+            "派生集是空的。检查 --pred 是不是对应轮次的预测、--tasks 有没有拼错 —— "
+            "写出一份空的评估集，下一步推理会正常跑完然后报表上多一格「样本不足」，"
+            "而那格实际上是这里的配置错了。"
+        )
+    path = write_jsonl(derived, args.out)
+    print(f"派生 {len(derived)} 条 -> {path}")
+    return path
+
+
 HANDLERS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "convert": _handle_convert,
     "infer": _handle_infer,
@@ -238,6 +338,7 @@ HANDLERS: dict[str, Callable[[argparse.Namespace], Any]] = {
     "sweep": _handle_sweep,
     "all": _handle_all,
     "build-dpo": _handle_build_dpo,
+    "derive": _handle_derive,
 }
 
 

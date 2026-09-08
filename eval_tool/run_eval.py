@@ -181,6 +181,7 @@ def run(config: EvalConfig) -> dict[str, Path]:
         dataset_kinds={key: spec.kind for key, spec in plan},
         dataset_engines={key: spec.engine for key, spec in plan},
         dataset_weights=config.dataset_weights,
+        chain_decay_pairs=config.chain_decay_pairs,
     )
     fingerprint_path = config.out_dir / "run_fingerprint.json"
     fingerprint_path.write_text(

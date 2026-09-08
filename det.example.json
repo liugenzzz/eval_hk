@@ -165,6 +165,50 @@
         "classes_yaml": "/path/on/eval/server/classes.yaml",
         "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe"
       }
+    },
+    "describe_modelhist": {
+      "name": "describe_modelhist",
+      "kind": "describe",
+      "params": {
+        "select": [
+          {
+            "turn": 2
+          },
+          {
+            "task_type": [
+              "inventory_locate"
+            ],
+            "turn": 3
+          }
+        ],
+        "classes_yaml": "/path/on/eval/server/classes.yaml",
+        "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe",
+        "image_root": "/path/on/eval/server/images"
+      }
+    },
+    "reverse_consistency": {
+      "name": "reverse_consistency",
+      "kind": "object_ident",
+      "params": {
+        "select": [
+          {
+            "turn": 1
+          }
+        ],
+        "classes_yaml": "/path/on/eval/server/classes.yaml"
+      }
+    },
+    "question_perturbation": {
+      "name": "question_perturbation",
+      "kind": "perturbation",
+      "params": {
+        "select": [
+          {
+            "turn": 1
+          }
+        ],
+        "consistent_iou": 0.9
+      }
     }
   },
   "enabled_datasets": [
@@ -175,7 +219,10 @@
     "inventory",
     "attribute_qa",
     "exist_negative",
-    "describe"
+    "describe",
+    "describe_modelhist",
+    "reverse_consistency",
+    "question_perturbation"
   ],
   "models": [
     {
@@ -282,8 +329,17 @@
       "attribute_qa": 0.05,
       "inventory": 0.0,
       "exist_negative": 0.0,
-      "describe": 0.0
-    }
+      "describe": 0.0,
+      "describe_modelhist": 0.0,
+      "reverse_consistency": 0.0,
+      "question_perturbation": 0.0
+    },
+    "chain_decay": [
+      {
+        "gold": "describe",
+        "model": "describe_modelhist"
+      }
+    ]
   },
   "infer": {
     "prompt_files": {},
