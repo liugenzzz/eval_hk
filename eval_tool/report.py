@@ -27,7 +27,15 @@ from .length_control import pairwise_length_control, pointwise_length_control
 
 # 达标率之外还值得按维度拆的连续量。四点偏差和 IoU 是连续值，只报一个达标率会丢掉
 # 「差多少」的信息 —— 达标率一样的两个模型，偏差均值可以差一倍。
-BREAKDOWN_METRICS = ("hit", "localized", "dev_mean4_pct", "iou", "format_ok", "task_bleed")
+#
+# 后半段是 D 组的代码指标（§15.3）：范围合规、CHAIR 幻觉、空话率与裁判分**并列报**。
+# 裁判和被测同家族，没有异家族裁判可以做自偏检测，这三个是 D 组唯一不受裁判偏置影响
+# 的客观锚 —— 两者走向不一致时以代码指标为准。
+BREAKDOWN_METRICS = (
+    "hit", "localized", "dev_mean4_pct", "iou", "format_ok", "task_bleed",
+    "scope_ok", "chair_s", "chair_i", "is_filler",
+    "judge_correct", "judge_grounded", "judge_informative",
+)
 
 
 def write_reports(

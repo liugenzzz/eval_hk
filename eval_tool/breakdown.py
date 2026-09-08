@@ -305,7 +305,13 @@ def default_dims() -> list[DimSpec]:
             {"key": "size_bucket", "from": "meta.size_bucket",
              "only_kinds": ["grounding_single", "grounding_multi"]},
             {"key": "label", "from": "meta.label", "worst_n": 20},
-            {"key": "describe_kind", "from": "meta.describe_kind", "only_kinds": ["judge_text"]},
+            # 7 种 describe kind 的答案信息结构完全不同，合成一个平均分等于把这次
+            # 数据集设计的核心抹掉。报表必须有 7 行。
+            {"key": "describe_kind", "from": "meta.describe_kind",
+             "only_kinds": ["judge_text", "describe"]},
+            # §2.1：D 组内部按上游形态拆行 —— 文字指代 / 坐标回指 / 上文承接是三种
+            # 不同的能力，平均成一个数就看不出是哪一种垮了。
+            {"key": "upstream_form", "from": "upstream_form", "only_kinds": ["describe"]},
             {"key": "count_bin", "from": "meta.count", "only_kinds": ["counting"],
              "bins": [[1, 1, "单例"], [2, 5, "少量"], [6, None, "密集"]]},
             {"key": "counting", "from": "meta.counting", "only_kinds": ["counting"]},

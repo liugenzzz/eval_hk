@@ -194,4 +194,4 @@ def test_continuous_metrics_can_be_summarised_too():
 def test_default_dims_cover_every_axis_the_report_needs():
     keys = {dim.key for dim in default_dims()}
     assert keys == {"task_type", "difficulty", "size_bucket", "label", "describe_kind",
-                    "count_bin", "counting"}
+                    "count_bin", "counting", "upstream_form"}

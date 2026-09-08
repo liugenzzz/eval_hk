@@ -52,6 +52,32 @@ python -m eval_tool all --config pipeline.json
 | `counting` | code | 计数。精确命中率 + MAE + 偏向；`counting=="zero"` 一路并进拒答表。 |
 | `inventory` | code | 清单。类别集合 P/R/F1 与数量分开判，不合成一个分。 |
 | `exist_negative` | code | 拒答表。拒答准确率 + yes 偏置率。 |
+| `describe` | judge | D 组自由描述。代码判范围合规 / CHAIR / 空话，裁判判正确性 / 落地性 / 信息量。 |
+
+### D 组描述：代码判和裁判判的分工
+
+| 维度 | 引擎 | 说明 |
+|---|---|---|
+| 正确性 `judge_correct` | 裁判 | 说的内容图里有吗 |
+| 落地性 `judge_grounded` | 裁判 | 说的是不是**这个框里**的东西 |
+| 信息量 `judge_informative` | 裁判 | 是不是「一辆车」这种空话 |
+| **范围合规** `scope_ok` | **代码** | `appearance` 有没有跑去说方位、`position` 有没有跑去说外观 |
+| CHAIR 幻觉 `chair_i` / `chair_s` | 代码 | 描述里提到的类别有多少不在这张图的真值集合里 |
+| 空话 `is_filler` | 代码 | 把类别名去掉之后基本什么都不剩 |
+
+**范围合规必须走代码**：通用的「描述准确性」rubric 会给跑题答案高分（说得没错啊），裁判判不出「跑题」这件事。词表直接读构建端 `prompts/describe/*.txt` 的 `#! must-not:` 行（`params.describe_prompt_dir`），那是生成这批数据时用的同一份约束，重写一遍必然对不上。
+
+三个代码指标与裁判分**并列报**。裁判是 Qwen3.8-27B，被测是 Qwen3-VL-8B，同家族 —— 同家族裁判可能偏爱同家族的输出风格，而我们没有异家族裁判可以做自偏检测。这一条必须写进每份评估报告的「已知局限」。两者走向不一致时**以代码指标为准**。
+
+`do_pointwise: false` 时只出这三个代码指标，一次裁判都不调 —— 它们本来就是最先该看的。
+
+**CHAIR 要两头都权威才出数**，否则标 `chair_available=0`：
+- 类别集合来自 `meta.inventory`（构建端给的完整可见目标清单）。用 label 拼的集合不完整，图里真实存在但没进评估集标注的目标会被记成模型编的 —— **高估**幻觉。
+- 类别表来自 `params.classes_yaml`。兜底表只含评估集出现过的 label，模型编出一个「船」而表里没有「船」，这个词根本不会被识别成类别 —— **漏报**幻觉。
+
+D 组报表按两根轴拆：`describe_kind`（7 种，答案信息结构完全不同，合成平均分等于把数据集设计的核心抹掉）和 `upstream_form`（文字指代 / 坐标回指 / 上文承接，是三种不同的能力）。
+
+D 组的 rubric 解析**独立成文件**（`describe_rubric.py`），不复用 `judge_rubrics.parse_pointwise` —— 那一支是装备评估四个 rubric 版本的解析中枢，要保证历史数据按当初的口径读回来，往里加新格式等于动一个正在服役的跨版本兼容解析器。
 
 ### 评估集 test.jsonl 直读
 

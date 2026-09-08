@@ -92,6 +92,34 @@ class ClassTable:
                 return self._norm2name[candidate]  # type: ignore[attr-defined]
         return None
 
+    def find_all_in_text(self, text: object) -> tuple[str, ...]:
+        """一句话里提到的**全部**类别名，最长匹配且不重叠。
+
+        「一辆遮阳三轮车停在卡车旁边」→ (遮阳三轮车, 卡车)，不会因为「遮阳三轮车」
+        里含「三轮车」而多数出一个类别 —— CHAIR 幻觉率按类别计数，多数一个就是
+        凭空多一次幻觉。
+        """
+        haystack = normalize(text)
+        if not haystack:
+            return ()
+        found: list[tuple[int, str]] = []
+        occupied = [False] * len(haystack)
+        for candidate in self._by_length:  # type: ignore[attr-defined]
+            if not candidate:
+                continue
+            start = haystack.find(candidate)
+            while start >= 0:
+                end = start + len(candidate)
+                if not any(occupied[start:end]):
+                    for i in range(start, end):
+                        occupied[i] = True
+                    found.append((start, self._norm2name[candidate]))  # type: ignore[attr-defined]
+                start = haystack.find(candidate, start + 1)
+        seen: dict[str, None] = {}
+        for _, name in sorted(found):
+            seen.setdefault(name, None)
+        return tuple(seen)
+
     def relation(self, gold: object, pred: object) -> str:
         """四档判定。pred 不在类别表里时返回 OFF_TABLE。"""
         gold_norm = normalize(gold)

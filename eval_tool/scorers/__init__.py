@@ -128,6 +128,7 @@ def resolve_path(ctx: ScoringContext, value: object) -> Path:
 # 注册副作用靠 import 触发，放在文件末尾避免循环导入。
 from . import choice as _choice  # noqa: E402,F401
 from . import counting as _counting  # noqa: E402,F401
+from . import describe as _describe  # noqa: E402,F401
 from . import grounding as _grounding  # noqa: E402,F401
 from . import judge_text as _judge_text  # noqa: E402,F401
 from . import object_ident as _object_ident  # noqa: E402,F401
