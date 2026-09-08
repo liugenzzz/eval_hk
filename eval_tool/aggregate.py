@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 
 
-def bootstrap_binary_ci(values: Sequence[object], n_bootstrap: int = 1000, seed: int = 42) -> tuple[float, float]:
+def bootstrap_mean_ci(values: Sequence[object], n_bootstrap: int = 1000, seed: int = 42) -> tuple[float, float]:
+    """均值的 bootstrap 置信区间。0/1 和连续量共用一套 —— 四点偏差、IoU 都是连续值，
+    ``summarize_binary_metric`` 只接受 0/1 的那条路把它们挡在外面了。"""
     arr = pd.Series(values).dropna().astype(float).to_numpy()
     if len(arr) == 0:
         return math.nan, math.nan
@@ -21,6 +23,137 @@ def bootstrap_binary_ci(values: Sequence[object], n_bootstrap: int = 1000, seed:
         means[i] = sample.mean()
     low, high = np.quantile(means, [0.025, 0.975])
     return round(float(low), 4), round(float(high), 4)
+
+
+def bootstrap_binary_ci(values: Sequence[object], n_bootstrap: int = 1000, seed: int = 42) -> tuple[float, float]:
+    return bootstrap_mean_ci(values, n_bootstrap=n_bootstrap, seed=seed)
+
+
+def bootstrap_paired_diff_ci(
+    challenger: Sequence[object],
+    baseline: Sequence[object],
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """**配对** bootstrap：对同一样本上的差值重采样，返回 (差值, ci_low, ci_high)。
+
+    两个模型跑在同一批样本上，非配对的区间会宽得多 —— 它把「两批不同样本」的抽样
+    波动也算了进去，而那部分波动在配对设计里根本不存在。小幅提升是不是真的，只有
+    配对区间说得清：base 和 sft 在同一条难题上一起答错，那条样本对差值的贡献是 0，
+    不该给区间贡献宽度。
+
+    两个序列必须**逐位对齐**（同一个下标是同一条样本）。任一边缺值的样本整条丢掉，
+    差值就无从谈起。
+    """
+    left = pd.Series(challenger).astype(float)
+    right = pd.Series(baseline).astype(float)
+    if len(left) != len(right):
+        raise ValueError(f"配对 bootstrap 需要等长的两列，得到 {len(left)} 和 {len(right)}")
+    mask = left.notna() & right.notna()
+    diff = (left[mask] - right[mask]).to_numpy()
+    if len(diff) == 0:
+        return math.nan, math.nan, math.nan
+    observed = round(float(diff.mean()), 4)
+    if len(diff) == 1:
+        return observed, observed, observed
+    rng = np.random.default_rng(seed)
+    means = np.empty(n_bootstrap, dtype=float)
+    for i in range(n_bootstrap):
+        means[i] = rng.choice(diff, size=len(diff), replace=True).mean()
+    low, high = np.quantile(means, [0.025, 0.975])
+    return observed, round(float(low), 4), round(float(high), 4)
+
+
+def summarize_metric(
+    data: pd.DataFrame,
+    group_cols: list[str],
+    metric_col: str,
+    bootstrap_n: int = 1000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """任意数值列的分组均值 + n + CI。0/1 和连续量都走这里。"""
+    rows: list[dict[str, object]] = []
+    if data.empty or metric_col not in data.columns:
+        return pd.DataFrame(columns=[*group_cols, "metric", "score", "n", "ci_low", "ci_high"])
+    for group_key, group in data.groupby(group_cols, dropna=False):
+        if not isinstance(group_key, tuple):
+            group_key = (group_key,)
+        values = pd.to_numeric(group[metric_col], errors="coerce").dropna()
+        low, high = bootstrap_mean_ci(values, n_bootstrap=bootstrap_n, seed=seed)
+        row: dict[str, object] = {col: value for col, value in zip(group_cols, group_key)}
+        row.update(
+            {
+                "metric": metric_col,
+                "score": round(float(values.mean()), 4) if len(values) else math.nan,
+                "n": int(len(values)),
+                "ci_low": low,
+                "ci_high": high,
+            }
+        )
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def summarize_paired_diff(
+    details: pd.DataFrame,
+    baseline_model: str,
+    metric_col: str = "hit",
+    group_cols: list[str] | None = None,
+    bootstrap_n: int = 1000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """每个 challenger 相对 baseline 的配对差值与区间，按 index 对齐样本。
+
+    区间不含 0 才说明这个提升不是抽样噪声。非配对区间在同样的数据上会宽不少，
+    容易把真的小幅提升判成「看不出差别」。
+    """
+    required = {"model", "index", metric_col}
+    if details.empty or not required.issubset(details.columns):
+        return pd.DataFrame()
+    group_cols = group_cols or ["dataset"]
+    group_cols = [col for col in group_cols if col in details.columns]
+    baseline = details[details["model"] == baseline_model]
+    if baseline.empty:
+        return pd.DataFrame()
+    rows: list[dict[str, object]] = []
+    for model_name, model_df in details.groupby("model"):
+        if model_name == baseline_model:
+            continue
+        merged = model_df.merge(
+            baseline[["index", *group_cols, metric_col]],
+            on=["index", *group_cols],
+            how="inner",
+            suffixes=("", "_baseline"),
+        )
+        if merged.empty:
+            continue
+        keys = group_cols or ["__all__"]
+        if not group_cols:
+            merged["__all__"] = "overall"
+        for group_key, group in merged.groupby(keys, dropna=False):
+            if not isinstance(group_key, tuple):
+                group_key = (group_key,)
+            diff, low, high = bootstrap_paired_diff_ci(
+                group[metric_col], group[f"{metric_col}_baseline"], bootstrap_n, seed
+            )
+            row: dict[str, object] = {col: value for col, value in zip(keys, group_key)}
+            row.update(
+                {
+                    "model": str(model_name),
+                    "baseline_model": baseline_model,
+                    "metric": metric_col,
+                    "diff": diff,
+                    "diff_ci_low": low,
+                    "diff_ci_high": high,
+                    "n_paired": int(len(group)),
+                    # 区间不含 0 才算「真的动了」。
+                    "significant": bool(
+                        not math.isnan(low) and not math.isnan(high) and (low > 0 or high < 0)
+                    ),
+                }
+            )
+            rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def summarize_binary_metric(

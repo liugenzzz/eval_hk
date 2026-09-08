@@ -11,9 +11,23 @@ from .aggregate import (
     make_metric_summary,
     make_wide_summary,
     make_weighted_score_summary,
+    summarize_paired_diff,
     summarize_pairwise_vs_baseline,
 )
+from .breakdown import (
+    EmptyCells,
+    DimSpec,
+    default_dims,
+    make_breakdown,
+    make_failure_buckets,
+    make_weighted_total,
+    parse_dims,
+)
 from .length_control import pairwise_length_control, pointwise_length_control
+
+# 达标率之外还值得按维度拆的连续量。四点偏差和 IoU 是连续值，只报一个达标率会丢掉
+# 「差多少」的信息 —— 达标率一样的两个模型，偏差均值可以差一倍。
+BREAKDOWN_METRICS = ("hit", "localized", "dev_mean4_pct", "iou", "format_ok", "task_bleed")
 
 
 def write_reports(
@@ -25,6 +39,11 @@ def write_reports(
     seed: int,
     do_length_control: bool = True,
     category_weights: dict[str, float] | None = None,
+    report_dims: list[DimSpec] | None = None,
+    empty_cells: EmptyCells | None = None,
+    dataset_kinds: dict[str, str] | None = None,
+    dataset_engines: dict[str, str] | None = None,
+    dataset_weights: dict[str, float] | None = None,
 ) -> dict[str, Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -57,6 +76,21 @@ def write_reports(
         long_path = out / "report_summary_long.csv"
         long_summary.to_csv(long_path, index=False, encoding="utf-8-sig")
         written["report_summary_long.csv"] = long_path
+
+        written.update(
+            _write_breakdowns(
+                out,
+                all_details,
+                baseline_model=baseline_model,
+                bootstrap_n=bootstrap_n,
+                seed=seed,
+                report_dims=report_dims,
+                empty_cells=empty_cells,
+                dataset_kinds=dataset_kinds,
+                dataset_engines=dataset_engines,
+                dataset_weights=dataset_weights,
+            )
+        )
 
         for model, table in make_cross_tables(all_details).items():
             path = out / f"cross_{_safe_name(model)}.csv"
@@ -127,3 +161,64 @@ def _safe_name(name: object) -> str:
 
 def _detail_without_image(data: pd.DataFrame) -> pd.DataFrame:
     return data.drop(columns=[col for col in data.columns if col == "image"], errors="ignore")
+
+
+def _write_breakdowns(
+    out: Path,
+    all_details: pd.DataFrame,
+    *,
+    baseline_model: str,
+    bootstrap_n: int,
+    seed: int,
+    report_dims: list[DimSpec] | None,
+    empty_cells: EmptyCells | None,
+    dataset_kinds: dict[str, str] | None,
+    dataset_engines: dict[str, str] | None,
+    dataset_weights: dict[str, float] | None,
+) -> dict[str, Path]:
+    """§17 的拆分表、§16.2 的配对区间、验收总分。
+
+    这几张表才是这次评估的产出。report_summary 那几张是旧通路留下的总览，一个总分
+    回答不了「哪一档、哪一类、哪种尺寸还不行」。
+    """
+    written: dict[str, Path] = {}
+    dims = report_dims if report_dims is not None else default_dims()
+    breakdown = make_breakdown(
+        all_details,
+        dims,
+        metrics=[m for m in BREAKDOWN_METRICS if m in all_details.columns],
+        kinds=dataset_kinds or {},
+        empty_cells=empty_cells,
+        bootstrap_n=bootstrap_n,
+        seed=seed,
+    )
+    if not breakdown.empty:
+        path = out / "breakdown.csv"
+        breakdown.to_csv(path, index=False, encoding="utf-8-sig")
+        written["breakdown.csv"] = path
+
+    buckets = make_failure_buckets(all_details)
+    if not buckets.empty:
+        path = out / "failure_buckets.csv"
+        buckets.to_csv(path, index=False, encoding="utf-8-sig")
+        written["failure_buckets.csv"] = path
+
+    if dataset_engines:
+        total = make_weighted_total(all_details, dataset_weights or {}, dataset_engines)
+        if not total.empty:
+            path = out / "acceptance_score.csv"
+            total.to_csv(path, index=False, encoding="utf-8-sig")
+            written["acceptance_score.csv"] = path
+
+    paired_frames = [
+        summarize_paired_diff(all_details, baseline_model, metric_col=metric,
+                              group_cols=["dataset"], bootstrap_n=bootstrap_n, seed=seed)
+        for metric in BREAKDOWN_METRICS
+        if metric in all_details.columns
+    ]
+    paired_frames = [frame for frame in paired_frames if not frame.empty]
+    if paired_frames:
+        path = out / "paired_diff_vs_baseline.csv"
+        pd.concat(paired_frames, ignore_index=True).to_csv(path, index=False, encoding="utf-8-sig")
+        written["paired_diff_vs_baseline.csv"] = path
+    return written

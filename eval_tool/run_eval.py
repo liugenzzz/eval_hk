@@ -7,6 +7,7 @@ import pandas as pd
 
 from . import scorers
 from .cache import JsonlCache
+from .breakdown import EmptyCells, parse_dims
 from .compliance import attach_compliance
 from .scale import scale_of
 from .config import EvalConfig, load_config
@@ -156,6 +157,11 @@ def run(config: EvalConfig) -> dict[str, Path]:
         seed=config.seed,
         do_length_control=config.do_length_control,
         category_weights=config.category_weights,
+        report_dims=parse_dims(config.report_dims) if config.report_dims else None,
+        empty_cells=EmptyCells.parse(config.empty_cells),
+        dataset_kinds={key: spec.kind for key, spec in plan},
+        dataset_engines={key: spec.engine for key, spec in plan},
+        dataset_weights=config.dataset_weights,
     )
     if warnings:
         warn_path = config.out_dir / "warnings.log"

@@ -68,6 +68,10 @@ class EvalConfig:
     # 配置文件所在目录。params 里的相对路径（类别表、词表、问法池）按它解析，
     # 这样一份配置在哪台机器上跑都指得对。
     base_dir: Path | None = None
+    # 报表：拆分维度、显式声明的空格子、验收总分的数据集权重。
+    report_dims: list[dict[str, Any]] = field(default_factory=list)
+    empty_cells: dict[str, Any] = field(default_factory=dict)
+    dataset_weights: dict[str, float] = field(default_factory=dict)
 
     def kind_for(self, dataset_key: str) -> str:
         kind = self.dataset_kinds.get(dataset_key) or DEFAULT_DATASET_KINDS.get(dataset_key)
@@ -154,6 +158,9 @@ class PipelineConfig:
     )
     dataset_kinds: dict[str, str] = field(default_factory=dict)
     dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    report_dims: list[dict[str, Any]] = field(default_factory=list)
+    empty_cells: dict[str, Any] = field(default_factory=dict)
+    dataset_weights: dict[str, float] = field(default_factory=dict)
 
     @property
     def artifacts(self) -> ArtifactLayout:
@@ -263,6 +270,9 @@ class PipelineConfig:
             dataset_kinds=dict(self.dataset_kinds),
             dataset_params={k: dict(v) for k, v in self.dataset_params.items()},
             base_dir=self.config_path.parent,
+            report_dims=[dict(d) for d in self.report_dims],
+            empty_cells=dict(self.empty_cells),
+            dataset_weights=dict(self.dataset_weights),
         )
 
 
@@ -341,6 +351,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     datasets, dataset_kinds, dataset_params = parse_datasets(
         raw.get("datasets") or DEFAULT_DATASETS
     )
+    report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
 
     enabled_raw = raw.get("enabled_datasets", list(datasets))
     if not isinstance(enabled_raw, list):
@@ -447,6 +458,9 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         datasets=datasets,
         dataset_kinds=dataset_kinds,
         dataset_params=dataset_params,
+        report_dims=report_dims,
+        empty_cells=empty_cells,
+        dataset_weights=dataset_weights,
         models=models,
         baseline_model=baseline_model,
         infer=infer,
@@ -472,6 +486,7 @@ def load_config(path: str | Path) -> EvalConfig:
     base_dir = path.parent
     datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
     datasets, dataset_kinds, dataset_params = parse_datasets(datasets_raw)
+    report_dims, empty_cells, dataset_weights = _parse_report_block(raw)
     models_raw = raw.get("models") or raw.get("MODELS") or []
     models = [
         ModelConfig(
@@ -526,6 +541,9 @@ def load_config(path: str | Path) -> EvalConfig:
         dataset_kinds=dataset_kinds,
         dataset_params=dataset_params,
         base_dir=base_dir,
+        report_dims=report_dims,
+        empty_cells=empty_cells,
+        dataset_weights=dataset_weights,
     )
 
 
@@ -703,4 +721,35 @@ def _pipeline_judge_settings(value: object, base_dir: Path) -> JudgeSettings:
             base_dir,
             JudgeSettings.pairwise_prompt,
         ),
+    )
+
+
+def _parse_report_block(
+    raw: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, float]]:
+    """report 块：拆分维度、显式声明的空格子、验收总分的数据集权重。
+
+        "report": {
+          "dims": [{"key": "size_bucket", "from": "meta.size_bucket"}],
+          "empty_cells": {"by_design": [["ground_part", "hard"]],
+                          "not_in_data": ["ground_unique"]},
+          "dataset_weights": {"ground_box": 0.40, "region_identify": 0.25}
+        }
+    """
+    report_raw = raw.get("report") or {}
+    if not isinstance(report_raw, dict):
+        raise ConfigError("report must be an object")
+    dims_raw = report_raw.get("dims") or []
+    if not isinstance(dims_raw, list):
+        raise ConfigError("report.dims must be a list")
+    empty_raw = report_raw.get("empty_cells") or {}
+    if not isinstance(empty_raw, dict):
+        raise ConfigError("report.empty_cells must be an object")
+    weights_raw = report_raw.get("dataset_weights") or {}
+    if not isinstance(weights_raw, dict):
+        raise ConfigError("report.dataset_weights must be an object")
+    return (
+        [dict(item) for item in dims_raw],
+        dict(empty_raw),
+        {str(k): float(v) for k, v in weights_raw.items()},
     )

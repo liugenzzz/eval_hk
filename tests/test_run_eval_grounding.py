@@ -107,3 +107,32 @@ def test_threshold_params_reach_the_scorer_through_the_config(workspace):
     assert pd.read_csv(loose["report_summary.csv"]).loc[0, "ground_box:overall"] == 1.0
     strict = _run(tmp_path, tsv_dir, predictions, dev_threshold_pct=1.0)
     assert pd.read_csv(strict["report_summary.csv"]).loc[0, "ground_box:overall"] == 0.0
+
+
+def test_breakdown_and_acceptance_tables_are_written(workspace):
+    """这几张表才是产出：一个总分回答不了「哪一档、哪一类、哪种尺寸还不行」。"""
+    tmp_path, tsv_dir = workspace
+    written = _run(
+        tmp_path,
+        tsv_dir,
+        [
+            {"index": "img0_ground_appearance_0__t1", "prediction": '{"bbox_2d":[102,101,598,603]}'},
+            {"index": "img1_ground_appearance_1__t1", "prediction": '{"bbox_2d":[105,105,595,595]}'},
+            {"index": "img2_ground_appearance_2__t1", "prediction": '{"bbox_2d":[700,700,900,900]}'},
+            {"index": "img3_ground_appearance_3__t1", "prediction": "图中没有这样的目标。"},
+        ],
+    )
+    breakdown = pd.read_csv(written["breakdown.csv"])
+    assert set(breakdown["dim"]) >= {"task_type", "size_bucket"}
+    # n=4 的格子标「样本不足」，不给百分比
+    assert set(breakdown["status"]) == {"insufficient"}
+    assert breakdown["score"].isna().all()
+
+    buckets = pd.read_csv(written["failure_buckets.csv"]).iloc[0]
+    assert buckets["pass_rate"] == 0.5
+    assert buckets["fail_localize_fail"] == 0.25
+    assert buckets["fail_malformed"] == 0.25
+
+    total = pd.read_csv(written["acceptance_score.csv"]).iloc[0]
+    # n=4 < 30，不进总分，但要在报表里点名，不能静默消失
+    assert "ground_box(n=4)" in str(total["excluded_small_n"])

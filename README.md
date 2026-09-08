@@ -112,6 +112,54 @@ def score_grounding_single(data, ctx):
     ...
 ```
 
+## 报表：拆开看，不给单一总分
+
+`eval` 除了旧的 `report_summary.*`，还会写这几张：
+
+| 文件 | 内容 |
+|---|---|
+| `breakdown.csv` | 模型 × 数据集 × 维度 × 取值 × 指标，每格带 `n` / CI / `status` |
+| `failure_buckets.csv` | 达标率 + 三个失败桶，三桶加起来 = 1 − 达标率 |
+| `acceptance_score.csv` | 验收总分（只由 `engine="code"` 的数据集加权构成） |
+| `paired_diff_vs_baseline.csv` | 相对 base 的**配对** bootstrap 差值与区间 |
+
+`status` 分五种，其中后三种在报表上都是空白 —— **实现的人看到空格会当 bug 修，所以必须分开标注**：
+
+| status | 含义 |
+|---|---|
+| `ok` | n 够，可以下结论 |
+| `trend_only` | 维度声明了 `level: "group"`（如难度档在 task 级），只看趋势不下结论 |
+| `insufficient` | n < `min_n`（默认 30），显示 n 但不显示百分比 |
+| `by_design` | 该组合**本就不产样本**（`ground_part` 没有 hard 档） |
+| `not_in_data` | 该任务**产出为 0**（`ground_unique` / `spatial_relation`） |
+
+配置：
+
+```json
+"report": {
+  "dims": [
+    {"key": "task_type",   "from": "task_type"},
+    {"key": "difficulty",  "from": "meta.difficulty",  "level": "group"},
+    {"key": "size_bucket", "from": "meta.size_bucket", "only_kinds": ["grounding_single", "grounding_multi"]},
+    {"key": "label",       "from": "meta.label",       "worst_n": 20},
+    {"key": "count_bin",   "from": "meta.count",       "only_kinds": ["counting"],
+     "bins": [[1, 1, "单例"], [2, 5, "少量"], [6, null, "密集"]]}
+  ],
+  "empty_cells": {
+    "by_design":   [["ground_part", "hard"], ["ground_contrast", "hard"]],
+    "not_in_data": ["ground_unique", "spatial_relation"]
+  },
+  "dataset_weights": {
+    "ground_box": 0.40, "detect_box": 0.20, "region_identify": 0.25,
+    "count_class": 0.10, "attribute_qa": 0.05
+  }
+}
+```
+
+**验收总分只由代码打分器构成。** 裁判打的分会抖 —— 同一份预测重跑两遍数字就不一样，而验收需要的是「重跑一百遍逐位相同」。D 组描述的结论只做纵向对比，单独成表。
+
+**配对 bootstrap**（`paired_diff_vs_baseline.csv`）：两个模型跑在同一批样本上，非配对区间把「两批不同样本」的抽样波动也算了进去，而那部分波动在配对设计里根本不存在。base 和 sft 在同一条难题上一起答错，那条对差值的贡献是 0，不该给区间贡献宽度。`significant` 列就是「区间不含 0」。
+
 ## 图像像素面积与训练配置对齐
 
 `infer_config.example.json`、`pipeline.example.json` 和 `dpo.example.json` 的 `infer` 块都显式配置：
