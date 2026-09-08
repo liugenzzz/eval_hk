@@ -1,0 +1,68 @@
+{
+  "schema_version": "1.0",
+  "request_id": "qwen3vl8b_zb_sft_v3__step600",
+  "run_id": "qwen3vl8b_zb_sft_v3",
+  "step": 600,
+  "epoch": 1.5,
+  "level": "L1",
+  "status": "succeeded",
+  "model_name": "qwen3vl8b_zb_sft_v3_step600",
+  "suites": [
+    {
+      "suite": "equip_desc",
+      "display_name": "装备描述开放问答",
+      "line": "domain",
+      "primary_metric": "score",
+      "n": 300,
+      "sampled": true,
+      "metrics": [
+        { "key": "score", "metric_type": "llm_pointwise", "value": 0.7213, "n": 300,
+          "ci95": [0.6802, 0.7594], "delta_vs_base": 0.0841 },
+        { "key": "score_单轮", "metric_type": "llm_pointwise", "value": 0.7502, "n": 190 },
+        { "key": "score_多轮", "metric_type": "llm_pointwise", "value": 0.6810, "n": 110 }
+      ],
+      "artifacts": {
+        "report_dir": "/shared/eval_report/zb_v3/step-600/equip_desc",
+        "detail_xlsx": "/shared/eval_report/zb_v3/step-600/equip_desc/judge_detail_all.xlsx"
+      },
+      "fingerprint": {
+        "judge_fp": "d41d8cd98f00b204",
+        "tsv_sha256": "9f86d081884c7d65",
+        "rubric": "v4",
+        "sample_file": "samples/equip_desc__n300__seed42.json"
+      }
+    },
+    {
+      "suite": "general_vlm",
+      "display_name": "通用回归",
+      "line": "general",
+      "primary_metric": "mean_accuracy",
+      "n": 1565,
+      "sampled": true,
+      "metrics": [
+        { "key": "mean_accuracy", "metric_type": "accuracy", "value": 0.6712, "n": 1565,
+          "delta_vs_base": -0.0210 },
+        { "key": "RealWorldQA", "metric_type": "accuracy", "value": 0.7020, "n": 765 },
+        { "key": "MMMU_DEV_VAL", "metric_type": "accuracy", "value": 0.5875, "n": 400 },
+        { "key": "MathVista_MINI", "metric_type": "accuracy", "value": 0.7150, "n": 400 }
+      ],
+      "artifacts": {
+        "work_dir": "/shared/eval_report/zb_v3/step-600/general_vlm",
+        "status_json": "/shared/eval_report/zb_v3/step-600/general_vlm/qwen3vl8b_zb_sft_v3_step600/T20260908-121500/status.json"
+      },
+      "fingerprint": { "judge_model": "fx-q3-235", "vlmevalkit_commit": "c8951f0" }
+    }
+  ],
+  "alerts": [
+    { "kind": "general_regression", "suite": "general_vlm",
+      "message": "通用回归相对 base 下降 2.1pt", "severity": "warn" }
+  ],
+  "timing": {
+    "queued_at": "2026-09-08T12:00:05+08:00",
+    "started_at": "2026-09-08T12:00:20+08:00",
+    "finished_at": "2026-09-08T12:25:20+08:00",
+    "domain_seconds": 380,
+    "general_seconds": 1120
+  },
+  "error": null
+}
