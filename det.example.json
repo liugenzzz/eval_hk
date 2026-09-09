@@ -65,7 +65,8 @@
             "turn": 1
           }
         ],
-        "classes_yaml": "/path/on/eval/server/classes.yaml"
+        "classes_yaml": "/path/on/eval/server/classes.yaml",
+        "judge_synonym": true
       }
     },
     "count_class": {
@@ -114,7 +115,8 @@
             ],
             "turn": 1
           }
-        ]
+        ],
+        "judge_synonym": true
       }
     },
     "exist_negative": {
@@ -163,7 +165,8 @@
         ],
         "image_root": "/path/on/eval/server/images",
         "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe"
+        "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe",
+        "labels_dir": "/path/on/eval/server/labels"
       }
     },
     "describe_modelhist": {
@@ -183,7 +186,8 @@
         ],
         "classes_yaml": "/path/on/eval/server/classes.yaml",
         "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe",
-        "image_root": "/path/on/eval/server/images"
+        "image_root": "/path/on/eval/server/images",
+        "labels_dir": "/path/on/eval/server/labels"
       }
     },
     "reverse_consistency": {
@@ -195,7 +199,8 @@
             "turn": 1
           }
         ],
-        "classes_yaml": "/path/on/eval/server/classes.yaml"
+        "classes_yaml": "/path/on/eval/server/classes.yaml",
+        "judge_synonym": true
       }
     },
     "question_perturbation": {

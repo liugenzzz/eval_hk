@@ -27,6 +27,22 @@
 - `二值对照组与效应量检验_交接note.md` —— rubric v3b/v4b 与 `--dz-test` 的一次性交接说明（已应用）
 - `superpowers/plans/`、`superpowers/specs/` —— 历次功能的计划与设计文档，按日期命名
 
+## 离线跑通整条链路（不需要涉密数据）
+
+```bash
+# 数据构建端仓库里：拉公开的 VisDrone（548 图 / 38759 框）
+python scripts/get_visdrone.py --out ./data/visdrone
+
+# 本仓库：起假 VLM 顶替构建期要调的那个服务
+python scripts/fake_vlm_server.py 18899 &
+
+# 构建端 config/local.yaml 把 vlm.api_url 指过去，然后 python scripts/build.py
+# 拿产出的 test.jsonl 跑 python -m eval_tool eval --config det.json
+```
+
+`scripts/fake_vlm_server.py` 产出的描述是**套模板的**，可以用来验证链路通不通、报表出不出，
+**不能**用它跑出来的分数说明任何模型质量问题。
+
 ## 不在这里的东西
 
 - 模型评估的**需求文档**（v2，目标检测）在数据构建端仓库：

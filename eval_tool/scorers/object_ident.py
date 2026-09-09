@@ -20,7 +20,9 @@ import pandas as pd
 
 from ..classes import EXACT, HYPERNYM, HYPONYM, OFF_TABLE, OTHER, ClassTable, load_class_table, table_from_names
 from ..compliance import TEXT
+from ..synonym import EXACT
 from . import CODE, ScoringContext, register, resolve_path
+from . import _synonym_fallback
 
 
 def class_table_for(ctx: ScoringContext, data: pd.DataFrame) -> tuple[ClassTable, bool]:
@@ -97,4 +99,11 @@ def score_object_ident(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     scored = data.copy()
     for column in rows[0] if rows else []:
         scored[column] = [row[column] for row in rows]
-    return scored
+    # 自创词（off_table）交裁判判一次是不是同义。裁判判成上位/下位词的并进那两列
+    # 各自计数，**不进精确命中率** —— 否则「答粗一点更安全」这种退化会被洗白。
+    return _synonym_fallback.apply(
+        scored, ctx,
+        gold_of=lambda row: str(row.get("gold_label", "")),
+        pred_of=lambda row: str(row.get("prediction", "")),
+        promote_relations=(EXACT,),
+    )

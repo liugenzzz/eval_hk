@@ -35,6 +35,7 @@ from ..compliance import TEXT
 from ..counting import parse_inventory_gold
 from ..describe_rubric import DIMENSIONS, parse_describe
 from ..describe_scope import ScopeRule, chair, is_filler, load_scope_rules, rules_from_mapping
+from ..image_classes import ImageClassIndex, declared_image_classes
 from ..prompting import load_prompt_text
 from . import JUDGE, ScoringContext, register, resolve_path
 
@@ -74,12 +75,11 @@ def _class_table(ctx: ScoringContext, data: pd.DataFrame) -> tuple[ClassTable | 
 # 类别表照样能出范围合规和空话率两个指标，只是 CHAIR 不出。
 
 
-def _image_class_sets(data: pd.DataFrame) -> dict[str, list[str]]:
-    """每张图的**权威**类别集合，只从 ``meta.inventory`` 来。
+def _inventory_class_sets(data: pd.DataFrame) -> dict[str, list[str]]:
+    """从 ``meta.inventory`` 拿到的类别集合，按 source_image 索引。
 
-    inventory 是构建端给出的「这张图上清晰可见的全部目标」，是完整的。用 label 拼
-    出来的集合是不完整的 —— 图里真实存在但没进评估集标注的目标，会被一个不落地记成
-    模型编的，CHAIR 会系统性高估。没有 inventory 的图就不出 CHAIR，标「无法计算」。
+    只有 ``inventory_locate`` 那一种样本带 inventory，所以这条路覆盖不到四分之一的
+    描述样本 —— 它是最后的兜底，优先走原始标注文件那条（见 ``image_classes`` 模块）。
     """
     if "meta.inventory" not in data.columns:
         return {}
@@ -95,6 +95,26 @@ def _image_class_sets(data: pd.DataFrame) -> dict[str, list[str]]:
         if inventory.ok:
             out[str(row.get(source_col, ""))] = sorted(inventory.labels)
     return out
+
+
+def _gt_classes(
+    row: Mapping[str, Any],
+    index: ImageClassIndex,
+    inventory_sets: Mapping[str, list[str]],
+    source_col: str | None,
+) -> tuple[str, ...] | None:
+    """这张图的完整类别集合。三个来源按可信度排，取第一个拿得到的。"""
+    declared = declared_image_classes(row)
+    if declared is not None:
+        return declared
+    from_labels = index.classes_of(row.get("meta.source_annotation") or row.get("source_annotation"))
+    if from_labels is not None:
+        return from_labels
+    if source_col:
+        found = inventory_sets.get(str(row.get(source_col, "")))
+        if found is not None:
+            return tuple(found)
+    return None
 
 
 def _describe_kind(row: Mapping[str, Any]) -> str:
@@ -135,7 +155,12 @@ def _is_na(value: Any) -> bool:
 def score_describe(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     rules = _scope_rules(ctx)
     table, table_is_authoritative = _class_table(ctx, data)
-    class_sets = _image_class_sets(data)
+    inventory_sets = _inventory_class_sets(data)
+    labels_dir = ctx.params.get("labels_dir")
+    index = ImageClassIndex(
+        resolve_path(ctx, labels_dir) if labels_dir else None,
+        table if table_is_authoritative else None,
+    )
     source_col = next((c for c in ("meta.source_image", "source_id") if c in data.columns), None)
 
     rows: list[dict[str, Any]] = []
@@ -161,11 +186,11 @@ def score_describe(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
                            "mentioned_classes": "", "hallucinated_classes": ""})
         else:
             gt_classes = (
-                class_sets.get(str(row.get(source_col, "")))
-                if source_col and table_is_authoritative
+                _gt_classes(row, index, inventory_sets, source_col)
+                if table_is_authoritative
                 else None
             )
-            result = chair(prediction, gt_classes, table)
+            result = chair(prediction, list(gt_classes) if gt_classes else gt_classes, table)
             record.update(
                 {
                     "chair_i": result.chair_i if result.chair_i is not None else math.nan,

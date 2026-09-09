@@ -21,7 +21,9 @@ from typing import Any
 import pandas as pd
 
 from ..compliance import TEXT
+from ..synonym import EXACT, HYPERNYM, HYPONYM
 from . import CODE, ScoringContext, register
+from . import _synonym_fallback
 
 _PUNCT = re.compile(r"[\s，。、；：！？,.;:!?\"'“”‘’()（）\[\]【】]+")
 # 构建端答案模板的前后缀：「是…的」「这是…」「该区域内的是…」。只剥这几种固定说法，
@@ -81,4 +83,11 @@ def score_short_answer(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     scored = data.copy()
     for column in rows[0] if rows else []:
         scored[column] = [row[column] for row in rows]
-    return scored
+    # 「车身是白的」和「白色车身」意思一样、字不一样，代码判不了，交裁判。
+    # 短答案没有粒度关系可言，判成同义的三种关系都算命中。
+    return _synonym_fallback.apply(
+        scored, ctx,
+        gold_of=lambda row: str(row.get("gold_norm", "")),
+        pred_of=lambda row: str(row.get("prediction", "")),
+        promote_relations=(EXACT, HYPERNYM, HYPONYM),
+    )
