@@ -43,12 +43,33 @@ def strip_template(text: str) -> str:
 
 
 def _gold(row: Any) -> str:
-    """真值优先取 metadata.attribute（无模板包装），没有再退回答案句子。"""
-    for column in ("meta.attribute", "attribute"):
+    """真值取 ``metadata.attribute``（无模板包装），但**只在它确实是答案时**。
+
+    ``attribute`` 这个字段在两种任务上含义完全不同：
+
+    - ``attribute_qa``：``attribute="深灰色"`` —— 它**就是答案**，答案句子
+      「是深灰色的。」只是套了模板。
+    - ``ground_*``：``attribute="穿粉色外套"`` —— 它是**指代用的修饰语**，用来在
+      问句里指明是哪一个目标，和答案（一段外观描述）毫无关系。
+
+    无条件优先取它，会把 ground 任务的指代语当成金标，模型答得再对也全判错。判据用
+    ``attribute_kind``：构建端只给 ``attribute_qa`` 写这个字段（取值 color / feature），
+    ``ground_*`` 一律没有。
+    """
+    if _present(row, "meta.attribute_kind", "attribute_kind"):
+        for column in ("meta.attribute", "attribute"):
+            value = row.get(column)
+            if value is not None and not _is_na(value) and str(value).strip():
+                return normalize_answer(value)
+    return strip_template(normalize_answer(row.get("answer", "")))
+
+
+def _present(row: Any, *columns: str) -> bool:
+    for column in columns:
         value = row.get(column)
         if value is not None and not _is_na(value) and str(value).strip():
-            return normalize_answer(value)
-    return strip_template(normalize_answer(row.get("answer", "")))
+            return True
+    return False
 
 
 def _is_na(value: Any) -> bool:

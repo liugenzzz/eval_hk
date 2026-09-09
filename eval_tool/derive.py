@@ -183,6 +183,11 @@ def derive_reverse_consistency(
             # 它已经被正向的格式合规率记过一次了，再记一次是重复惩罚。
             continue
         box = predicted.boxes[0]
+        if box.area <= 0:
+            # 框整个飞出画面时（x1、x2 都 > scale），裁剪后两边都贴到边界，退化成
+            # 零宽或零高。拿它去问「这个区域里是什么」问的是一块零面积的地方，模型
+            # 答什么都没有意义，而这条样本在正向已经被记过一次错了。同上，丢掉。
+            continue
         gold = parse_boxes(turns[box_turn - 1][1], scale=scale)
         forward_iou = iou(box, gold.boxes[0]) if gold.ok else None
 

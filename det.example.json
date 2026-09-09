@@ -182,6 +182,21 @@
       "params": {
         "select": [
           {
+            "task_type": [
+              "ground_appearance",
+              "ground_full",
+              "ground_relation",
+              "ground_position",
+              "ground_part",
+              "ground_state",
+              "ground_contrast"
+            ],
+            "turn": 2
+          },
+          {
+            "task_type": [
+              "detect_describe"
+            ],
             "turn": 2
           },
           {

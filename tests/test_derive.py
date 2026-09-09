@@ -163,6 +163,22 @@ def test_an_unparseable_forward_box_is_dropped(pools):
     assert derive_reverse_consistency([GROUND], predictions, question_pool=pools["region"]) == []
 
 
+def test_a_forward_box_that_clips_to_zero_area_is_dropped(pools):
+    """模型的框整个飞出画面（x1、x2 都 > 1000）时，裁剪后两边都贴到边界，退化成零宽。
+    拿它去问「这个区域里是什么」问的是一块零面积的地方，模型答什么都没有意义 ——
+    而这条样本在正向已经被记过一次错了。实测这种占到 11%。"""
+    predictions = {"img1_ground_appearance_0__t1": '{"bbox_2d":[1200,273,1300,324]}'}
+    assert derive_reverse_consistency([GROUND], predictions, question_pool=pools["region"]) == []
+
+
+def test_a_forward_box_that_merely_overflows_is_kept(pools):
+    """只是部分越界、裁剪后仍有面积的，照常问 —— 越界只计数不扣分。"""
+    predictions = {"img1_ground_appearance_0__t1": '{"bbox_2d":[900,100,1200,300]}'}
+    derived = derive_reverse_consistency([GROUND], predictions, question_pool=pools["region"])
+    assert len(derived) == 1
+    assert derived[0]["metadata"]["forward_box"] == [900.0, 100.0, 1000.0, 300.0]
+
+
 def test_reverse_consistency_can_be_limited_to_certain_tasks(pools):
     predictions = {
         "img1_ground_appearance_0__t1": '{"bbox_2d":[110,105,205,195]}',
@@ -257,3 +273,21 @@ def test_conflicting_predictions_for_one_index_are_refused(tmp_path):
     pd.DataFrame([{"index": "x__t1", "prediction": "别的"}]).to_csv(b, index=False)
     with pytest.raises(ValueError, match="index 冲突"):
         load_predictions([a, b])
+
+
+def test_the_model_history_dataset_selects_the_same_turns_as_the_main_one():
+    """派生集是主线的镜像。选的轮次不一样，链路衰减率的分子分母就不是同一件事。
+
+    最容易写错的是拿 ``{"turn": 2}`` 不带任务过滤当简写 —— 那会把
+    ``inventory_locate`` 的轮 2（**一个坐标框**）当成描述丢给裁判打分。
+    """
+    import json
+    from pathlib import Path
+
+    config = json.loads(Path("det.example.json").read_text(encoding="utf-8"))
+    datasets = config["datasets"]
+    assert (datasets["describe_modelhist"]["params"]["select"]
+            == datasets["describe"]["params"]["select"])
+    # 每条规则都必须点名任务，不能只写 turn
+    for rule in datasets["describe"]["params"]["select"]:
+        assert rule.get("task_type"), f"select 规则没点名任务：{rule}"
