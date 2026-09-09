@@ -303,6 +303,26 @@
         "only_kinds": [
           "describe"
         ]
+      },
+      {
+        "key": "answer_format",
+        "from": "meta.answer_format"
+      },
+      {
+        "key": "polarity",
+        "from": "meta.polarity",
+        "only_kinds": [
+          "exist_negative",
+          "counting"
+        ]
+      },
+      {
+        "key": "hard_negative",
+        "from": "meta.hard_negative",
+        "only_kinds": [
+          "exist_negative",
+          "counting"
+        ]
       }
     ],
     "empty_cells": {

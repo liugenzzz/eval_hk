@@ -70,6 +70,10 @@ def _class_table(ctx: ScoringContext, data: pd.DataFrame) -> tuple[ClassTable | 
     return (table_from_names(sorted(names)) if names else None), False
 
 
+# describe 用自己的这一份而不是 object_ident 的：那边找不到类别表会抛，而 D 组没有
+# 类别表照样能出范围合规和空话率两个指标，只是 CHAIR 不出。
+
+
 def _image_class_sets(data: pd.DataFrame) -> dict[str, list[str]]:
     """每张图的**权威**类别集合，只从 ``meta.inventory`` 来。
 

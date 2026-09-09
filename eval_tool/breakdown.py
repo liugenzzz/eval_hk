@@ -315,6 +315,16 @@ def default_dims() -> list[DimSpec]:
             {"key": "count_bin", "from": "meta.count", "only_kinds": ["counting"],
              "bins": [[1, 1, "单例"], [2, 5, "少量"], [6, None, "密集"]]},
             {"key": "counting", "from": "meta.counting", "only_kinds": ["counting"]},
+            # region_identify 既有「说出类别」也有「用一个词回答」（answer_format=short）。
+            # 短答案那一路模型更容易只吐一个词，混在一起报会把这个混淆因素算进能力差异。
+            {"key": "answer_format", "from": "meta.answer_format"},
+            # 拒答表按正负样本和 hard negative 拆。负样本是易混类别（图里有卡车问货车），
+            # 相当于 POPE 的 Adversarial 档；数据里若同时有 hard_negative=false 的负样本，
+            # 两档的差值就免费给出了「模型是在看图还是在用语言先验猜」的对照。
+            {"key": "polarity", "from": "meta.polarity",
+             "only_kinds": ["exist_negative", "counting"]},
+            {"key": "hard_negative", "from": "meta.hard_negative",
+             "only_kinds": ["exist_negative", "counting"]},
         ]
     )
 

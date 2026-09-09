@@ -23,26 +23,40 @@ from ..compliance import TEXT
 from . import CODE, ScoringContext, register, resolve_path
 
 
-def class_table_for(ctx: ScoringContext, data: pd.DataFrame) -> ClassTable:
-    """类别表优先从 ``params.classes_yaml`` 读；没配就用真值 label 列里出现过的类别兜底。
+def class_table_for(ctx: ScoringContext, data: pd.DataFrame) -> tuple[ClassTable, bool]:
+    """返回 (类别表, 是不是权威的)。
 
-    兜底表只覆盖评估集里出现过的类别，判不出「模型答了一个别的合法类别」这种情形
-    （会记成 off_table 多走一次裁判），所以正式跑必须配 classes_yaml。评估在内网机器
-    上跑，那份表本来就在那儿，配一个路径即可，不需要把它搬进仓库。
+    优先从 ``params.classes_yaml`` 读（构建端那份 347 类的表）；没配就用真值 label 列
+    里出现过的类别兜底。
 
-    兜底只认 label 列，**不拿答案句子凑表**：「该区域内的是遮阳三轮车。」整句进表
-    之后，最长匹配会把它当成一个类别名，模型原样复述反而被判成下位命中。
+    **兜底表会算错，而且是往高了算。** 类别表不完整时，最长匹配只能匹到表里有的那个
+    较短的名字：金标「人员」、模型答「军事人员」，表里没有「军事人员」，于是从这句话
+    里抠出「人员」，判成**精确命中** —— 一个答细了（很可能在幻觉一个看不清的属性）的
+    回答被记成了满分。配上真实类别表，同一条会正确判成下位命中。
+
+    所以正式跑**必须**配 classes_yaml。评估在内网机器上跑，那份表本来就在那儿，配一个
+    路径即可，不需要把它搬进仓库。每一行都会带 ``class_table_authoritative`` 说明这次
+    用的是哪种表。
+
+    兜底只认 label 列，**不拿答案句子凑表**：「该区域内的是遮阳三轮车。」整句进表之后，
+    最长匹配会把它当成一个类别名，模型原样复述反而被判成下位命中。
     """
     configured = ctx.params.get("classes_yaml") or ctx.params.get("classes_path")
     if configured:
-        return load_class_table(resolve_path(ctx, configured))
+        return load_class_table(resolve_path(ctx, configured)), True
     label_col = next((c for c in ("meta.label", "label") if c in data.columns), None)
     if label_col is None:
         raise ValueError(
             "object_ident 需要类别表：给 params 配 classes_yaml，或让数据带 meta.label 列"
         )
     names = {str(v).strip() for v in data[label_col].dropna().tolist() if str(v).strip()}
-    return table_from_names(sorted(names))
+    print(
+        f"[warn] {ctx.dataset_key}: 没有配 params.classes_yaml，用评估集里出现过的 "
+        f"{len(names)} 个 label 兜底。表不完整时上下位判定会把「答细了」误判成精确命中，"
+        f"主指标会偏高。正式跑请配上真实类别表。",
+        flush=True,
+    )
+    return table_from_names(sorted(names)), False
 
 
 def _gold_label(row: Any, table: ClassTable) -> str:
@@ -57,7 +71,7 @@ def _gold_label(row: Any, table: ClassTable) -> str:
 
 @register("object_ident", engine=CODE, answer_form=TEXT)
 def score_object_ident(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
-    table = class_table_for(ctx, data)
+    table, authoritative = class_table_for(ctx, data)
     rows: list[dict[str, Any]] = []
     for _, row in data.iterrows():
         gold = _gold_label(row, table)
@@ -76,6 +90,8 @@ def score_object_ident(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
             # 裁判兜底的候选（约 5% 触发）。判词在阶段 6 接上，这里先把口子留出来。
             "judge_fallback_needed": int(relation == OFF_TABLE),
             "error_confusable": int(relation == OTHER and table.is_confusable(gold, pred_label)),
+            # 0 表示这次用的是兜底类别表，精确命中率可能偏高（见 class_table_for）。
+            "class_table_authoritative": int(authoritative),
         }
         rows.append(record)
     scored = data.copy()
