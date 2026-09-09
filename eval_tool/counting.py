@@ -24,10 +24,13 @@ _NO_TARGET = re.compile(r"没有|不存在|未(?:发现|找到|看到)|无(?!人
 
 # 「3名人员」「2 辆卡车」「1艘船」：数字 + 可选量词 + 类别名。
 # 量词只是一个可选的单字，不去对量词表 —— 模型把「辆」说成「台」不该算它数错。
+# 类别名里允许连字符、下划线和间隔号：VisDrone 的 awning-tricycle 这种复合词，
+# 截断之后 gold 有 awning-tricycle、pred 只有 awning，会同时记一次漏报和一次误报 ——
+# 模型答得完全正确，集合 F1 却从 1.0 掉到 0.8。
 _ITEM = re.compile(
     r"(?P<num>\d+|[零〇一两二三四五六七八九十]+)\s*"
     r"(?P<measure>[个只名辆台艘架条把根株棵])?\s*"
-    r"(?P<label>[一-鿿A-Za-z][一-鿿A-Za-z0-9]*)"
+    r"(?P<label>[一-鿿A-Za-z][一-鿿A-Za-z0-9_·\-]*[一-鿿A-Za-z0-9]|[一-鿿A-Za-z])"
 )
 _SPLIT = re.compile(r"[、,，;；]|和|以及|还有")
 

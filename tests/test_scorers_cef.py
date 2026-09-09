@@ -95,6 +95,36 @@ def test_short_answer_exact_match_ignores_punctuation():
     assert out.loc[1, "judge_fallback_needed"] == 1
 
 
+def test_short_answer_gold_comes_from_metadata_not_the_templated_sentence():
+    """构建端的答案是套模板生成的：同一个属性会写成「深灰色」「是深灰色的。」
+    「深灰色。」几种。拿整句做精确匹配，模型答对了内容却因为模板不同被判错 ——
+    而且这个误差**不对称**：SFT 被训练成输出这套模板，base 没有，于是 base 因
+    格式而虚低，差值里混着格式差异。真值取 metadata.attribute 就没有这个包装。"""
+    out = _score("short_answer", [
+        {"index": "1", "meta.attribute": "深灰色", "answer": "是深灰色的。", "prediction": "是深灰色的。"},
+        {"index": "2", "meta.attribute": "深灰色", "answer": "是深灰色的。", "prediction": "深灰色"},
+        {"index": "3", "meta.attribute": "深灰色", "answer": "是深灰色的。", "prediction": "这是深灰色的"},
+        {"index": "4", "meta.attribute": "深灰色", "answer": "是深灰色的。", "prediction": "白色"},
+    ])
+    assert out["hit"].tolist() == [1, 1, 1, 0]
+    assert out["gold_norm"].tolist() == ["深灰色"] * 4
+
+
+def test_template_stripping_does_not_turn_a_negation_into_a_match():
+    """剥过头会把「不是深灰色」剥成「深灰色」，把答错判成答对。"""
+    out = _score("short_answer", [
+        {"index": "1", "meta.attribute": "深灰色", "answer": "是深灰色的。", "prediction": "不是深灰色的"},
+    ])
+    assert out.loc[0, "hit"] == 0
+
+
+def test_short_answer_falls_back_to_the_answer_text_without_metadata():
+    out = _score("short_answer", [
+        {"index": "1", "answer": "是深灰色的。", "prediction": "深灰色"},
+    ])
+    assert out.loc[0, "hit"] == 1
+
+
 def test_loose_match_is_a_diagnostic_column_not_the_metric():
     """「白色车身的面包车」包含「白色车身」，宽松口径会把多说了别的东西的答案算对。"""
     out = _score("short_answer", [{"index": "1", "answer": "白色车身", "prediction": "白色车身的面包车"}])

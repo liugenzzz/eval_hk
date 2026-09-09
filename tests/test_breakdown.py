@@ -196,3 +196,16 @@ def test_default_dims_cover_every_axis_the_report_needs():
     assert keys == {"task_type", "difficulty", "size_bucket", "label", "describe_kind",
                     "count_bin", "counting", "upstream_form", "answer_format",
                     "polarity", "hard_negative"}
+
+
+def test_a_cell_with_no_usable_values_is_dropped_rather_than_greyed():
+    """关了 pointwise 时 describe 的 hit 全是 NA，counting=zero 那一路按设计也不进
+    F 组准确率。这不是「样本不足」，是这个指标对那一格不适用 —— 照样出行只会在
+    报表里刷几十条无信息的灰格。"""
+    data = pd.DataFrame(
+        [{"model": "sft", "dataset": "d", "index": str(i), "task_type": "ground_full",
+          "hit": None} for i in range(40)]
+    )
+    out = make_breakdown(data, parse_dims([{"key": "task_type", "from": "task_type"}]),
+                         bootstrap_n=50)
+    assert out.empty

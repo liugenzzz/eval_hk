@@ -92,3 +92,17 @@ def test_count_bins_follow_the_tallyqa_split():
 def test_zero_gold_belongs_to_no_count_bin():
     """真值为 0 的那一路走拒答表，塞进「单例」会让那一档混进不是在数数的样本。"""
     assert count_bin(0) == ""
+
+
+def test_hyphenated_labels_are_not_truncated():
+    """VisDrone 的 awning-tricycle 这类复合词，截断之后 gold 有 awning-tricycle、
+    pred 只有 awning，会同时记一次漏报和一次误报 —— 模型答得完全正确，集合 F1 却
+    从 1.0 掉到 0.8。"""
+    inventory = parse_inventory("图中有1个awning-tricycle、1个bus、5个van。")
+    assert inventory.items == {"awning-tricycle": 1, "bus": 1, "van": 5}
+    assert parse_inventory_gold(["awning-tricyclex1", "vanx5"]).items == {
+        "awning-tricycle": 1, "van": 5}
+
+
+def test_single_character_labels_still_parse():
+    assert parse_inventory("2个船").items == {"船": 2}

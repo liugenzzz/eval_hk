@@ -188,6 +188,11 @@ def _cells_for(
             continue
         scores = numeric.loc[index].dropna()
         n = int(len(scores))
+        if n == 0:
+            # 这一格一个可用值都没有（比如关了 pointwise 时 describe 的 hit 全是 NA，
+            # 或者 counting=zero 那一路按设计不进 F 组准确率）。这不是「样本不足」，
+            # 是这个指标对这一格不适用 —— 照样出行只会在报表里刷几十条无信息的灰格。
+            continue
         if n < dim.min_n:
             # n 太小的格子显示 n，但不显示百分比 —— 一个 n=3 的 100% 会被当成结论。
             status, score, low, high = INSUFFICIENT, math.nan, math.nan, math.nan
