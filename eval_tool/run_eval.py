@@ -41,9 +41,14 @@ def run(config: EvalConfig) -> dict[str, Path]:
     plan = _scoring_plan(config)
     truth = {
         dataset_key: load_truth_dataset(
-            config.tsv_dir, config.datasets[dataset_key], config.params_for(dataset_key)
+            config.tsv_dir,
+            config.datasets[dataset_key],
+            config.params_for(dataset_key),
+            # 代码打分器不看图。判分时为了几个纯代码指标把整批图读进内存没有道理，
+            # 而推理端读同一份配置时一律要图（见 load_truth_dataset）。
+            need_images=spec.needs_judge,
         )
-        for dataset_key, _ in plan
+        for dataset_key, spec in plan
     }
     # 图片按数据集各建一张表：不同数据集的 index 是各自编号的，合成一张会串图。
     image_maps = {key: image_map_from_truth(frame) for key, frame in truth.items()}

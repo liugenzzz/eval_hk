@@ -64,9 +64,21 @@ def load_truth_dataset(
     tsv_dir: str | Path,
     dataset_name: str,
     params: Mapping[str, Any] | None = None,
+    *,
+    need_images: bool = True,
 ) -> pd.DataFrame:
     """读真值。jsonl 走评估集通路（按轮次拆行、metadata 扁平化、select 选取），
-    tsv 维持原样。"""
+    tsv 维持原样。
+
+    ``need_images`` 控制要不要把图片编成 base64 塞进 ``image`` 列：
+
+    - **推理端一律要图**（默认 True）。模型看不见图就没法框目标，那一整批预测全是废的。
+    - **评估端只有裁判组要图**。代码打分器（画框、计数、识别）压根不看图，为了跑一次
+      坐标打分把几个 G 的图读进内存没有道理。
+
+    两边共用同一份 ``params``，所以图片开关不能只靠配不配 ``image_root`` —— 配置里
+    照常写路径，用途上的差别在这里区分。
+    """
     path = truth_path(tsv_dir, dataset_name)
     if path.suffix.lower() == ".jsonl":
         from .eval_set import load_eval_set
@@ -79,7 +91,7 @@ def load_truth_dataset(
             load_eval_set(
                 path,
                 select=params.get("select"),
-                image_root=params.get("image_root"),
+                image_root=params.get("image_root") if need_images else None,
                 category_field=params.get("category_field"),
                 **kwargs,
             )

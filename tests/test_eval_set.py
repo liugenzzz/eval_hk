@@ -282,3 +282,27 @@ def test_load_truth_dataset_passes_category_field_through_params(tmp_path):
     frame = load_truth_dataset(tmp_path, "book_vqa", {"category_field": "category"})
 
     assert frame.iloc[0]["category"] == "拱形基础"
+
+
+def test_eval_side_skips_image_encoding_but_infer_side_does_not(tmp_path, eval_set):
+    """推理端和评估端共用同一份 params，但对图的需求相反：
+
+    - 模型看不见图就没法框目标，**推理端一律要图**。
+    - 代码打分器（画框、计数、识别）压根不看图，评估端为了几个纯代码指标把整批图
+      读进内存没有道理。
+
+    所以图片开关不能只靠配不配 image_root —— 配置里照常写路径，用途上的差别由
+    ``need_images`` 区分。
+    """
+    (tmp_path / "a.jpg").write_bytes(b"\xff\xd8fake")
+    (tmp_path / "b.jpg").write_bytes(b"\xff\xd8fake2")
+    eval_set.rename(tmp_path / "eval_set_v1.jsonl")
+    params = {"select": [{"turn": 1}], "image_root": str(tmp_path)}
+
+    for_infer = load_truth_dataset(tmp_path, "eval_set_v1", params, need_images=True)
+    assert (for_infer["image"].astype(str).str.len() > 0).all()
+
+    for_code_scoring = load_truth_dataset(tmp_path, "eval_set_v1", params, need_images=False)
+    assert (for_code_scoring["image"].astype(str).str.len() == 0).all()
+    # 除了图片，两边读到的必须是同一批行
+    assert for_infer["index"].tolist() == for_code_scoring["index"].tolist()

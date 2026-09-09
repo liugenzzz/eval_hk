@@ -33,7 +33,8 @@
           }
         ],
         "iou_gate": 0.5,
-        "dev_threshold_pct": 5.0
+        "dev_threshold_pct": 5.0,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "detect_box": {
@@ -50,7 +51,8 @@
           }
         ],
         "iou_gate": 0.5,
-        "dev_threshold_pct": 5.0
+        "dev_threshold_pct": 5.0,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "region_identify": {
@@ -66,7 +68,8 @@
           }
         ],
         "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "judge_synonym": true
+        "judge_synonym": true,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "count_class": {
@@ -87,7 +90,8 @@
             "turn": 1
           }
         ],
-        "dense_from": 6
+        "dense_from": 6,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "inventory": {
@@ -101,7 +105,8 @@
             ],
             "turn": 1
           }
-        ]
+        ],
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "attribute_qa": {
@@ -116,7 +121,8 @@
             "turn": 1
           }
         ],
-        "judge_synonym": true
+        "judge_synonym": true,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "exist_negative": {
@@ -130,7 +136,8 @@
             ],
             "turn": 1
           }
-        ]
+        ],
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "describe": {
@@ -200,7 +207,8 @@
           }
         ],
         "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "judge_synonym": true
+        "judge_synonym": true,
+        "image_root": "/path/on/eval/server/images"
       }
     },
     "question_perturbation": {
@@ -212,7 +220,8 @@
             "turn": 1
           }
         ],
-        "consistent_iou": 0.9
+        "consistent_iou": 0.9,
+        "image_root": "/path/on/eval/server/images"
       }
     }
   },
