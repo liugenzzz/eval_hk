@@ -65,6 +65,10 @@ class EvalConfig:
     # dataset_key -> 打分器 kind / 打分器参数。留空则回落到 DEFAULT_DATASET_KINDS。
     dataset_kinds: dict[str, str] = field(default_factory=dict)
     dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # score_summary 的 total_score 里，一个分类至少要有多少行才算数。None 沿用
+    # aggregate.MIN_CATEGORY_N（30）。分类多而每类样本少（书籍那种七大类）时，
+    # 不调低这个门槛的话 total_score 会整列为空。
+    min_category_n: int | None = None
     # 配置文件所在目录。params 里的相对路径（类别表、词表、问法池）按它解析，
     # 这样一份配置在哪台机器上跑都指得对。
     base_dir: Path | None = None
@@ -112,6 +116,13 @@ class InferConfig:
     clean_partial: bool = False
     image_min_pixels: int | None = None
     image_max_pixels: int | None = None
+    # 真值是 jsonl 时要用的读取参数（select / image_root / category_field）。
+    # 推理端和评估端读的必须是同一批行，所以这里传的和 EvalConfig.dataset_params
+    # 是同一份东西；TSV 真值用不到，留空即可。
+    dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def params_for(self, dataset_key: str) -> dict[str, Any]:
+        return dict(self.dataset_params.get(dataset_key) or {})
 
 
 @dataclass(frozen=True)
@@ -164,6 +175,7 @@ class PipelineConfig:
     )
     dataset_kinds: dict[str, str] = field(default_factory=dict)
     dataset_params: dict[str, dict[str, Any]] = field(default_factory=dict)
+    min_category_n: int | None = None
     report_dims: list[dict[str, Any]] = field(default_factory=list)
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
@@ -227,6 +239,11 @@ class PipelineConfig:
                     clean_partial=clean_partial,
                     image_min_pixels=self.infer.image_min_pixels,
                     image_max_pixels=self.infer.image_max_pixels,
+                    dataset_params={
+                        key: dict(params)
+                        for key, params in self.dataset_params.items()
+                        if key in pending_datasets
+                    },
                 )
             )
         return configs
@@ -278,6 +295,7 @@ class PipelineConfig:
             category_weights=dict(self.category_weights),
             dataset_kinds=dict(self.dataset_kinds),
             dataset_params={k: dict(v) for k, v in self.dataset_params.items()},
+            min_category_n=self.min_category_n,
             base_dir=self.config_path.parent,
             report_dims=[dict(d) for d in self.report_dims],
             empty_cells=dict(self.empty_cells),
@@ -289,6 +307,19 @@ class PipelineConfig:
 
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
+
+
+def _optional_min_category_n(raw: dict[str, Any]) -> int | None:
+    value = raw.get("min_category_n", raw.get("MIN_CATEGORY_N"))
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ConfigError("min_category_n must be an integer") from None
+    if parsed < 1:
+        raise ConfigError("min_category_n must be >= 1")
+    return parsed
 
 
 def parse_datasets(
@@ -472,6 +503,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         datasets=datasets,
         dataset_kinds=dataset_kinds,
         dataset_params=dataset_params,
+        min_category_n=_optional_min_category_n(raw),
         report_dims=report_dims,
         empty_cells=empty_cells,
         dataset_weights=dataset_weights,
@@ -558,6 +590,7 @@ def load_config(path: str | Path) -> EvalConfig:
         category_weights=category_weights,
         dataset_kinds=dataset_kinds,
         dataset_params=dataset_params,
+        min_category_n=_optional_min_category_n(raw),
         base_dir=base_dir,
         report_dims=report_dims,
         empty_cells=empty_cells,
@@ -574,8 +607,9 @@ def load_infer_config(path: str | Path) -> InferConfig:
     base_dir = path.parent
     infer_raw = raw.get("infer") or raw.get("INFER") or raw
     datasets_raw = infer_raw.get("datasets") or infer_raw.get("DATASETS") or DEFAULT_DATASETS
-    # 推理不关心 kind，但配置文件是同一份，得认得对象写法。
-    datasets, _, _ = parse_datasets(datasets_raw, where="infer.datasets")
+    # 推理不关心 kind，但配置文件是同一份，得认得对象写法。params 要接着用：
+    # jsonl 真值靠 image_root 才读得到图。
+    datasets, _, dataset_params = parse_datasets(datasets_raw, where="infer.datasets")
     prompt_files_raw = infer_raw.get("prompt_files") or infer_raw.get("PROMPT_FILES") or {}
     prompt_files = {str(k): _resolve_path(v, base_dir) for k, v in prompt_files_raw.items()}
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")
@@ -607,6 +641,7 @@ def load_infer_config(path: str | Path) -> InferConfig:
         ),
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
+        dataset_params=dataset_params,
     )
 
 

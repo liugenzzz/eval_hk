@@ -63,7 +63,11 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
             continue
         print(f"[infer] 读取数据集 {dataset_name} ...", flush=True)
         try:
-            data = load_truth_dataset(config.tsv_dir, dataset_name)
+            # 带上数据集参数：jsonl 真值要靠 image_root 才读得到图，靠
+            # category_field 才拿得到分类。不传的话推理端读到的是另一批行。
+            data = load_truth_dataset(
+                config.tsv_dir, dataset_name, config.params_for(dataset_key)
+            )
             if config.limit is not None:
                 data = data.head(config.limit).copy()
             rows = data.to_dict("records")

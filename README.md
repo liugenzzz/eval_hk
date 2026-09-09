@@ -136,6 +136,34 @@ v1  v2  v3  v3b  v4  v4b
 - 判断题（两个选项）要写 `params.choice_style: "judge"`。历史上这件事是靠数据集**键名叫不叫 `judge`** 来判的，新键名不会自动继承那个规则。
 - 装备和书籍放在同一份配置里跑也可以，报表里按 `dataset` 列天然分开。想分别加权就在 `report.dataset_weights` 里各给一个系数。
 
+### 评估集自带领域分类时，按分类分别出分
+
+书籍那批评估集每条自带一个领域分类（作战应用、拱形基础……七大类），要按这七类分别出分。
+评估集是 jsonl 就不用转 TSV —— 真值按数据集名找，**优先 `<name>.jsonl` 再回落 `<name>.tsv`**，
+`conversations`（ShareGPT）和 `messages`（OpenAI）两种形状都认。配置两处：
+
+```json
+"datasets": {
+  "book_vqa": { "name": "book_vqa", "kind": "judge_text",
+                "params": { "category_field": "category",
+                            "image_root": "/评估机器上的/images" } }
+},
+"report": { "dims": [ { "key": "category", "from": "category", "min_n": 10 } ] }
+```
+
+`params.category_field` 把记录里那个字段放到 `category` 列（不写就还是 `metadata.task_type`），
+`report.dims` 让 `breakdown.csv` 按它拆行。`metric=quality_score` 那几行是裁判 rubric 的
+0-100 原分（「作战应用 80 分」要的就是它），`metric=hit` 是通过率 —— 通过率一样的两个分类
+均分可以差十几分，两个口径别混着看。
+
+分类多而每类样本少时记得放宽两个门槛：维度上的 `min_n`（管 `breakdown.csv` 标不标灰）和
+顶层的 `min_category_n`（管 `score_summary.csv` 的 `total_score` 算不算这一类），默认都是 30。
+
+只有 `{"text": ...}` 的语料行没有问答对，会被跳过并计数 —— 要评估这部分内容得先转成问答形式。
+
+完整用法见 **[docs/guides/书籍评估_分类打分_使用说明.md](docs/guides/书籍评估_分类打分_使用说明.md)**，
+示例配置是 `book.example.json`。
+
 ---
 
 ## 目标检测评估
@@ -327,7 +355,7 @@ jsonl 走评估集通路：metadata 扁平化成 `meta.*` 列，多轮记录按�
 | `cross_{model}.csv` | 能力 × 内容类型交叉表 |
 | `detail_{model}_{dataset}.xlsx` | 逐条明细，不写入 base64 图片 |
 | `pairwise_vs_baseline.csv` | 各模型 vs 基准的胜/平/负率 |
-| **`breakdown.csv`** | 模型 × 数据集 × 维度 × 取值 × 指标，每格带 `n` / CI / `status` |
+| **`breakdown.csv`** | 模型 × 数据集 × 维度 × 取值 × 指标，每格带 `n` / CI / `status`。指标含裁判的 `quality_score`（0-100 原分）和 `hit`（通过率） |
 | **`failure_buckets.csv`** | 达标率 + 三个失败桶 |
 | **`acceptance_score.csv`** | 验收总分，只由 `engine="code"` 的数据集加权构成 |
 | **`paired_diff_vs_baseline.csv`** | 相对 base 的**配对** bootstrap 差值与区间 |

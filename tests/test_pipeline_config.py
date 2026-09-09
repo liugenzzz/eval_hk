@@ -344,3 +344,52 @@ def test_legacy_example_references_existing_prompts():
 
     assert config.judge.pointwise_prompt
     assert config.judge.pairwise_prompt
+
+
+def test_pipeline_hands_dataset_params_to_the_inference_configs(tmp_path):
+    """推理和评估必须读同一批行：jsonl 的 image_root / category_field 两边都要有。"""
+    path = _write_pipeline(
+        tmp_path,
+        datasets={
+            "book_vqa": {
+                "name": "book_vqa",
+                "kind": "judge_text",
+                "params": {"category_field": "category", "image_root": "images"},
+            }
+        },
+        enabled_datasets=["book_vqa"],
+    )
+    config = load_pipeline_config(path)
+
+    infer_config = config.to_infer_configs()[0]
+
+    assert infer_config.params_for("book_vqa")["category_field"] == "category"
+    assert config.to_eval_config().params_for("book_vqa")["category_field"] == "category"
+
+
+def test_min_category_n_defaults_to_none_and_is_validated(tmp_path):
+    assert load_pipeline_config(_write_pipeline(tmp_path)).min_category_n is None
+
+    config = load_pipeline_config(_write_pipeline(tmp_path, min_category_n=10))
+    assert config.min_category_n == 10
+    assert config.to_eval_config().min_category_n == 10
+
+    with pytest.raises(ConfigError):
+        load_pipeline_config(_write_pipeline(tmp_path, min_category_n=0))
+
+
+def test_legacy_eval_config_reads_min_category_n(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "tsv_dir": "tsv",
+                "datasets": {"vqa": "book_vqa"},
+                "models": [{"name": "base", "vqa": "pred.xlsx"}],
+                "min_category_n": 12,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert load_config(path).min_category_n == 12

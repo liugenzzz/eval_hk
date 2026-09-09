@@ -180,3 +180,37 @@ def test_load_infer_config_rejects_invalid_image_pixel_bounds(
 ):
     with pytest.raises(ConfigError, match=message):
         load_infer_config(_write_infer(tmp_path, **values))
+
+
+def test_infer_config_carries_dataset_params(tmp_path):
+    """jsonl 真值靠 params 才读得到图和分类，推理端拿不到就等于读了另一批行。"""
+    config_path = tmp_path / "infer.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "infer": {
+                    "model_name": "base",
+                    "model_path": "model",
+                    "tsv_dir": "tsv",
+                    "out_dir": "out",
+                    "datasets": {
+                        "book_vqa": {
+                            "name": "book_vqa",
+                            "kind": "judge_text",
+                            "params": {"category_field": "category",
+                                       "image_root": "/images"},
+                        }
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_infer_config(config_path)
+
+    assert config.params_for("book_vqa") == {
+        "category_field": "category",
+        "image_root": "/images",
+    }
+    assert config.params_for("mcq") == {}

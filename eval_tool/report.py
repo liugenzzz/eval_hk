@@ -7,6 +7,7 @@ from typing import Iterable
 import pandas as pd
 
 from .aggregate import (
+    MIN_CATEGORY_N,
     make_cross_tables,
     make_metric_summary,
     make_wide_summary,
@@ -32,8 +33,14 @@ from .length_control import pairwise_length_control, pointwise_length_control
 # 后半段是 D 组的代码指标（§15.3）：范围合规、CHAIR 幻觉、空话率与裁判分**并列报**。
 # 裁判和被测同家族，没有异家族裁判可以做自偏检测，这三个是 D 组唯一不受裁判偏置影响
 # 的客观锚 —— 两者走向不一致时以代码指标为准。
+#
+# ``quality_score`` 是裁判 rubric 的 0-100 原分（每个版本都归一到这一列）。``hit`` 是
+# 它过没过阈值的 0/1，两个数回答的不是同一个问题：一个分类通过率 0.67，均分可能是 72
+# 也可能是 88。书籍/装备那种按领域分类拆报表的场景要的是后者（「作战应用 80 分」），
+# 所以两个都拆。
 BREAKDOWN_METRICS = (
-    "hit", "localized", "dev_mean4_pct", "iou", "format_ok", "task_bleed",
+    "hit", "quality_score",
+    "localized", "dev_mean4_pct", "iou", "format_ok", "task_bleed",
     "scope_ok", "chair_s", "chair_i", "is_filler",
     "judge_correct", "judge_grounded", "judge_informative",
 )
@@ -54,6 +61,7 @@ def write_reports(
     dataset_engines: dict[str, str] | None = None,
     dataset_weights: dict[str, float] | None = None,
     chain_decay_pairs: list[dict[str, str]] | None = None,
+    min_category_n: int | None = None,
 ) -> dict[str, Path]:
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -62,7 +70,11 @@ def write_reports(
     written: dict[str, Path] = {}
 
     if not all_details.empty:
-        score_summary = make_weighted_score_summary(all_details, category_weights or {})
+        score_summary = make_weighted_score_summary(
+            all_details,
+            category_weights or {},
+            min_category_n=MIN_CATEGORY_N if min_category_n is None else min_category_n,
+        )
         if not score_summary.empty:
             score_path = out / "score_summary.csv"
             score_summary.to_csv(score_path, index=False, encoding="utf-8-sig")

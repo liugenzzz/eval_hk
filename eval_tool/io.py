@@ -72,11 +72,16 @@ def load_truth_dataset(
         from .eval_set import load_eval_set
 
         params = params or {}
+        kwargs: dict[str, Any] = {}
+        if params.get("default_category"):
+            kwargs["default_category"] = str(params["default_category"])
         return normalize_index(
             load_eval_set(
                 path,
                 select=params.get("select"),
                 image_root=params.get("image_root"),
+                category_field=params.get("category_field"),
+                **kwargs,
             )
         )
     return normalize_index(read_table(path))

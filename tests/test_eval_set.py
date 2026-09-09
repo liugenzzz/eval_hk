@@ -168,3 +168,117 @@ def test_json_array_input_is_accepted_too(tmp_path):
     path = tmp_path / "eval_set_v1.json"
     path.write_text(json.dumps([GROUND], ensure_ascii=False), encoding="utf-8")
     assert len(load_eval_set(path)) == 2
+
+
+# --- 书籍评估集：OpenAI messages + 每条自带领域分类 -------------------------
+
+BOOK = {
+    "id": "book_1",
+    "images": [],
+    "messages": [
+        {"role": "system", "content": "你是助手。"},
+        {"role": "user", "content": "拱形基础的作用是什么？"},
+        {"role": "assistant", "content": "承担上部载荷。"},
+    ],
+    "category": "拱形基础",
+}
+
+
+def _write_jsonl(tmp_path, records, name="book_vqa.jsonl"):
+    path = tmp_path / name
+    path.write_text(
+        "\n".join(json.dumps(record, ensure_ascii=False) for record in records) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_openai_messages_records_split_like_sharegpt(tmp_path):
+    frame = load_eval_set(_write_jsonl(tmp_path, [BOOK]))
+
+    assert len(frame) == 1
+    row = frame.iloc[0]
+    assert row["index"] == "book_1__t1"
+    assert row["question"] == "拱形基础的作用是什么？"
+    assert row["answer"] == "承担上部载荷。"
+    # system 轮既没有问题也没有参考答案，不成一轮
+    assert row["history"] == ""
+
+
+def test_multimodal_content_parts_count_as_image_tags(tmp_path):
+    image = tmp_path / "a.jpg"
+    image.write_bytes(b"pic")
+    record = {
+        "id": "book_img",
+        "images": ["a.jpg"],
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "a.jpg"}},
+                    {"type": "text", "text": "图里是什么？"},
+                ],
+            },
+            {"role": "assistant", "content": "一个拱形基础。"},
+        ],
+    }
+
+    frame = load_eval_set(_write_jsonl(tmp_path, [record]), image_root=tmp_path)
+
+    assert frame.iloc[0]["question"] == "图里是什么？"
+    assert frame.iloc[0]["image"]  # 图片片段算了一个 <image>，图被编进来了
+
+
+def test_category_field_puts_the_record_class_on_the_scoring_axis(tmp_path):
+    path = _write_jsonl(tmp_path, [BOOK, {**BOOK, "id": "book_2", "category": "作战应用"}])
+
+    frame = load_eval_set(path, category_field="category")
+
+    assert list(frame["category"]) == ["拱形基础", "作战应用"]
+
+
+def test_category_field_falls_back_when_the_record_has_no_class(tmp_path):
+    path = _write_jsonl(tmp_path, [{k: v for k, v in BOOK.items() if k != "category"}])
+
+    frame = load_eval_set(path, category_field="category")
+
+    assert frame.iloc[0]["category"] == "未分类"
+
+
+def test_category_field_also_reads_from_metadata(tmp_path):
+    record = {**{k: v for k, v in BOOK.items() if k != "category"},
+              "metadata": {"category": "材料工艺", "task_type": "book_qa"}}
+
+    frame = load_eval_set(_write_jsonl(tmp_path, [record]), category_field="category")
+
+    assert frame.iloc[0]["category"] == "材料工艺"
+
+
+def test_without_category_field_the_detection_chain_still_uses_task_type(tmp_path):
+    frame = load_eval_set(_write_jsonl(tmp_path, [GROUND], name="det.jsonl"))
+
+    assert set(frame["category"]) == {"ground_appearance"}
+
+
+def test_text_only_records_are_skipped_and_reported(tmp_path, capsys):
+    path = _write_jsonl(tmp_path, [BOOK, {"text": "书里的一段正文。", "category": "作战应用"}])
+
+    frame = load_eval_set(path, category_field="category")
+
+    assert len(frame) == 1
+    assert "跳过 1 条只有 text 字段的记录" in capsys.readouterr().out
+
+
+def test_a_file_of_only_text_lines_fails_loudly(tmp_path):
+    path = _write_jsonl(tmp_path, [{"text": "一段正文。"}])
+
+    with pytest.raises(ValueError):
+        load_eval_set(path)
+
+
+def test_load_truth_dataset_passes_category_field_through_params(tmp_path):
+    _write_jsonl(tmp_path, [BOOK])
+
+    frame = load_truth_dataset(tmp_path, "book_vqa", {"category_field": "category"})
+
+    assert frame.iloc[0]["category"] == "拱形基础"

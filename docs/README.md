@@ -7,6 +7,7 @@
 | 文件 | 讲什么 |
 |---|---|
 | [开放问答评估_使用说明.md](guides/开放问答评估_使用说明.md) | 装备描述问答（vqa）通路：转换 → 推理 → 裁判打分 → 报表 |
+| [书籍评估_分类打分_使用说明.md](guides/书籍评估_分类打分_使用说明.md) | 书籍通路：评估集 jsonl 直读，按七大类分别出分 |
 | [DPO_使用说明.md](guides/DPO_使用说明.md) | `build-dpo`：从 Alpaca/ShareGPT 直接构建 DPO 训练集 |
 | [DPO_分片直接合并_使用说明.md](guides/DPO_分片直接合并_使用说明.md) | `merge_dpo_shards.py`：从已完成的推理分片直接合并出 DPO JSONL（故障恢复用） |
 

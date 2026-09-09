@@ -209,3 +209,47 @@ def test_a_cell_with_no_usable_values_is_dropped_rather_than_greyed():
     out = make_breakdown(data, parse_dims([{"key": "task_type", "from": "task_type"}]),
                          bootstrap_n=50)
     assert out.empty
+
+
+# --- 按领域分类拆报表（书籍/装备共用的 category 轴） -----------------------
+
+
+def test_quality_score_is_broken_down_on_its_own_0_100_scale():
+    """通过率和均分回答的不是同一个问题，两个都得能拆开看。"""
+    rows = (
+        _rows(30, dataset="book_vqa", hit=lambda i: 1, category="作战应用",
+              quality_score=lambda i: 80)
+        + _rows(30, dataset="book_vqa", hit=lambda i: 1, category="拱形基础",
+                quality_score=lambda i: 95)
+    )
+    for i, row in enumerate(rows):
+        row["index"] = f"r{i}"
+
+    breakdown = make_breakdown(
+        pd.DataFrame(rows),
+        parse_dims([{"key": "category", "from": "category"}]),
+        metrics=["hit", "quality_score"],
+    )
+
+    quality = breakdown[breakdown["metric"] == "quality_score"].set_index("value")
+    assert quality.loc["作战应用", "score"] == 80.0
+    assert quality.loc["拱形基础", "score"] == 95.0
+    # 两类通过率一样，均分差 15 分 —— 只看 hit 会以为两类一样好
+    hits = breakdown[breakdown["metric"] == "hit"]
+    assert set(hits["score"]) == {1.0}
+
+
+def test_a_dimension_can_lower_its_own_sample_gate():
+    """七大类每类只有十几条时，30 行的默认门槛会把整张表标灰。"""
+    rows = _rows(12, dataset="book_vqa", category="作战应用", quality_score=lambda i: 70)
+
+    default_gate = make_breakdown(
+        pd.DataFrame(rows), parse_dims([{"key": "category", "from": "category"}])
+    )
+    lowered = make_breakdown(
+        pd.DataFrame(rows),
+        parse_dims([{"key": "category", "from": "category", "min_n": 10}]),
+    )
+
+    assert set(default_gate["status"]) == {INSUFFICIENT}
+    assert set(lowered["status"]) == {OK}
