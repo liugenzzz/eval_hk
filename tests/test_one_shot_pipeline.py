@@ -247,3 +247,27 @@ def test_missing_jsonl_is_reported_as_missing(tmp_path):
     config = load_pipeline_config(path)
     with pytest.raises(PipelineError, match="missing TSV/JSONL"):
         run_all(config, generator_factory=lambda name: _Fake())
+
+
+def test_zero_weight_datasets_stay_out_of_the_total():
+    """权重 0 = 不进总分（D 组、清单、拒答都是这么关掉的）。
+
+    它们照样是 code 引擎、分也算得出来，所以以前会被列进 datasets_in_total，
+    n_total 还把它们的样本数算进去 —— 总分是对的，但看着像覆盖了更多样本。
+    """
+    from eval_tool.breakdown import make_weighted_total
+
+    rows = [
+        {"model": "sft", "dataset": dataset, "index": f"{dataset}{i}", "hit": hit}
+        for dataset, hit in (("ground_box", 1.0), ("inventory", 0.0))
+        for i in range(40)
+    ]
+    total = make_weighted_total(
+        pd.DataFrame(rows),
+        {"ground_box": 0.4, "inventory": 0.0},
+        {"ground_box": "code", "inventory": "code"},
+    ).iloc[0]
+    assert total["total_score"] == 1.0
+    assert total["datasets_in_total"] == "ground_box"
+    assert total["excluded_zero_weight"] == "inventory"
+    assert total["n_total"] == 40

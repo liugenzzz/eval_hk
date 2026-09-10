@@ -266,10 +266,17 @@ def make_weighted_total(
         counts: dict[str, int] = {}
         skipped_judge: list[str] = []
         skipped_small: list[str] = []
+        skipped_zero: list[str] = []
         for dataset, group in frame.groupby("dataset"):
             key = str(dataset)
             if engines.get(key) != "code":
                 skipped_judge.append(key)
+                continue
+            # 权重 0 就是「不进总分」（D 组、清单、拒答都是这么关掉的）。它照样是
+            # code 引擎，分算得出来，但列进 datasets_in_total 会让人以为它有份 ——
+            # 而且 n_total 会把它的样本数也算进去，看着像总分覆盖了更多样本。
+            if float(weights.get(key, 1.0)) == 0.0:
+                skipped_zero.append(key)
                 continue
             values = pd.to_numeric(group[metric_col], errors="coerce").dropna()
             if len(values) < min_n:
@@ -289,6 +296,7 @@ def make_weighted_total(
             "n_total": int(sum(counts.values())),
             "datasets_in_total": ",".join(sorted(per_dataset)),
             "excluded_judge_datasets": ",".join(sorted(skipped_judge)),
+            "excluded_zero_weight": ",".join(sorted(skipped_zero)),
             "excluded_small_n": ",".join(sorted(skipped_small)),
         }
         for dataset in sorted(per_dataset):
