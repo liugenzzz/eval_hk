@@ -22,6 +22,8 @@ from .breakdown import (
     make_breakdown,
     make_chain_decay,
     make_failure_buckets,
+    make_judge_agreement,
+    make_judge_conclusion,
     make_weighted_total,
     parse_dims,
 )
@@ -233,6 +235,20 @@ def _write_breakdowns(
             path = out / "acceptance_score.csv"
             total.to_csv(path, index=False, encoding="utf-8-sig")
             written["acceptance_score.csv"] = path
+
+    # 交叉裁判（§15.2 自偏检测）。没配 judge.cross_check 时明细表里没有 hit__* 列，
+    # 两张表都是空的，不写文件。
+    agreement = make_judge_agreement(all_details)
+    if not agreement.empty:
+        path = out / "judge_agreement.csv"
+        agreement.to_csv(path, index=False, encoding="utf-8-sig")
+        written["judge_agreement.csv"] = path
+
+    conclusion = make_judge_conclusion(all_details, baseline_model)
+    if not conclusion.empty:
+        path = out / "judge_conclusion.csv"
+        conclusion.to_csv(path, index=False, encoding="utf-8-sig")
+        written["judge_conclusion.csv"] = path
 
     if chain_decay_pairs:
         decay = make_chain_decay(all_details, chain_decay_pairs)

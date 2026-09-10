@@ -197,17 +197,28 @@ v1  v2  v3  v3b  v4  v4b
 
 不达标的拆三个桶，加起来 = 1 − 达标率：`malformed`（格式不合规，训练配置问题）/ `localize_fail`（框到别的目标，补指代消歧和密集场景）/ `deviation`（框对了不够准，看 `bias_*` 定方向）。
 
-**跑之前必配三个路径**：
+**跑之前必配三个路径**。十一个数据集用的是同一份图和同一张类别表，所以写在顶层 `dataset_defaults` 一处，自动铺给每个数据集（数据集自己写的同名键仍然优先）：
 
 ```json
-"params": {
-  "image_root":   "/评估机器上的/images",         ← 每个数据集都要配，推理端一律要图
+"dataset_defaults": {
+  "image_root":   "/评估机器上的/images",         ← 推理端一律要图
   "classes_yaml": "/评估机器上的/classes.yaml",   ← 不配 E 组主指标会偏高
   "labels_dir":   "/评估机器上的/labels"          ← 配了 CHAIR 才有数
 }
 ```
 
-`image_root` 不配的话推理时模型看不见图，框出来的全是废的。评估端会自动跳过图片编码 —— 代码打分器不看图，只有裁判组才读。
+`image_root` 不配的话推理时模型看不见图，框出来的全是废的。评估端会自动跳过图片编码 —— 代码打分器不看图，只有裁判组才读。推理提示词同理：这十一个数据集都是原样透传问句，写一处 `infer.prompt_file`（单数）铺给全部，不用把同一行抄十一遍。
+
+**有第二个裁判就配上交叉验证**。需求文档自己写了一条做不到的局限：裁判和被测同家族，没法做自偏检测 —— 分高到底是模型强还是裁判认亲，一个裁判分不出来。配一路异家族裁判就补上了：
+
+```json
+"judge": {
+  "model": "qwen3.6-27b",
+  "cross_check": [{"name": "internvl", "api_base": "http://127.0.0.1:18181/v1/chat/completions", "model": "InternVL2-26B"}]
+}
+```
+
+每路只写和主裁判不同的字段，其余（尤其是提示词）全部继承。主裁判出的 `hit` 一个数都不变，明细表每行多一列 `hit__internvl`，报表多出 `judge_agreement.csv`（逐行一致性）和 `judge_conclusion.csv`（**换裁判之后结论会不会翻**）。后者是非看不可的那张：`verdict=flipped` 说明这份增益多半是裁判的家族偏好，不能报。
 
 其余全部细节 —— 打分器口径、评估集 `test.jsonl` 直读、D 组代码判与裁判判的分工、派生评估集、四指纹冻结、报表拆分与标灰规则 —— 见 **[docs/目标检测评估.md](docs/目标检测评估.md)**。
 
@@ -363,6 +374,8 @@ jsonl 走评估集通路：metadata 扁平化成 `meta.*` 列，多轮记录按�
 | **`acceptance_score.csv`** | 验收总分，只由 `engine="code"` 的数据集加权构成 |
 | **`paired_diff_vs_baseline.csv`** | 相对 base 的**配对** bootstrap 差值与区间 |
 | **`chain_decay.csv`** | 链路衰减率（gold 历史 vs 模型历史） |
+| **`judge_agreement.csv`** | 主裁判与异家族裁判逐行一致性（`delta` / `mad` / `agree_rate` / `spearman`）。配了 `judge.cross_check` 才有 |
+| **`judge_conclusion.csv`** | 换裁判之后相对 base 的增益会不会变号（`agree` / `flipped`）。同上 |
 | **`run_fingerprint.json`** | 评估集哈希 / 打分口径版本 / rubric 版本 / 裁判模型 |
 | `warnings.log` | 缺预测、额外 index、跳过项等警告 |
 

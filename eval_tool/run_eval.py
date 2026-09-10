@@ -76,6 +76,14 @@ def run(config: EvalConfig) -> dict[str, Path]:
         ("judge_fp", "model_A", "model_B", "index", "direction"),
     )
     print(f"[judge] model={config.judge.model} fingerprint={config.judge.fingerprint}", flush=True)
+    # 交叉裁判：每一路各起一个客户端，共用同一个 pointwise 缓存文件 —— 缓存键第一位
+    # 就是 judge_fp，不同裁判天然不撞。
+    cross_clients = [(name, JudgeClient(settings)) for name, settings in config.cross_check_judges]
+    for name, client in cross_clients:
+        print(
+            f"[judge:{name}] model={client.settings.model} fingerprint={client.settings.fingerprint}",
+            flush=True,
+        )
     details: list[pd.DataFrame] = []
     # dataset_key -> model_name -> 打过分的表，供 pairwise 取用
     scored_by_dataset: dict[str, dict[str, pd.DataFrame]] = {}
@@ -138,21 +146,37 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 aligned.extra_predictions.to_csv(extra_path, index=False, encoding="utf-8-sig")
                 warnings.append(f"[warn] {model.name} {dataset_key}: extra predictions written to {extra_path}")
 
-            scored = spec.score(
-                data,
-                scorers.ScoringContext(
+            # 默认参数把循环变量当场绑死：这个闭包会被交叉裁判那一趟再调一次，
+            # 晚绑定的话它读到的是循环最后一轮的 dataset_key。
+            def _context(
+                client: JudgeClient,
+                *,
+                dataset_key: str = dataset_key,
+                spec: scorers.ScorerSpec = spec,
+                model_name: str = model.name,
+            ) -> scorers.ScoringContext:
+                return scorers.ScoringContext(
                     dataset_key=dataset_key,
                     kind=spec.kind,
-                    model_name=model.name,
+                    model_name=model_name,
                     params=config.params_for(dataset_key),
                     base_dir=config.base_dir,
-                    judge_client=judge_client,
+                    judge_client=client,
                     judge_cache=pointwise_cache,
                     image_map=image_maps[dataset_key],
                     do_pointwise=config.do_pointwise,
                     max_workers=config.max_workers,
-                ),
-            )
+                )
+
+            # 交叉裁判要在**同一份输入**上重跑一遍，所以先留一份原样的副本：
+            # 打分器不保证不动传进去的表。
+            pristine = data.copy() if cross_clients and spec.needs_judge else None
+            scored = spec.score(data, _context(judge_client))
+            if pristine is not None:
+                scored = _attach_cross_check(
+                    scored, pristine, spec, cross_clients, _context,
+                    f"{model.name}/{dataset_key}", warnings,
+                )
             scored = _with_compliance(scored, spec, config, dataset_key)
             scored = stamp(scored, fingerprint)
             if spec.pairwise:
@@ -207,6 +231,42 @@ def run(config: EvalConfig) -> dict[str, Path]:
         warn_path.write_text("\n".join(warnings) + "\n", encoding="utf-8")
         written["warnings.log"] = warn_path
     return written
+
+
+def _attach_cross_check(
+    scored: pd.DataFrame,
+    data: pd.DataFrame,
+    spec: scorers.ScorerSpec,
+    cross_clients: list[tuple[str, JudgeClient]],
+    context_for,
+    where: str,
+    warnings: list[str],
+) -> pd.DataFrame:
+    """§15.2 自偏检测：让异家族裁判把同一批回答再判一遍，多出一列 hit__<名字>。
+
+    做成外挂的一趟而不是改打分器，是因为「换个裁判」这件事和「怎么打分」无关：
+    ScoringContext 里换掉 judge_client，同一个 spec.score 原样再跑一次就行，
+    打分器一个字都不用改，以后新增的裁判组打分器自动就有交叉验证。
+
+    只对 engine="judge" 的数据集做。代码打分器不调模型，换谁来判都是同一个数。
+    """
+    for name, client in cross_clients:
+        try:
+            alternate = spec.score(data.copy(), context_for(client))
+        except Exception as exc:  # noqa: BLE001 - 交叉验证是诊断项，挂了不该带崩主评估
+            msg = f"[warn] {where}: 交叉裁判 {name} 打分失败，跳过：{type(exc).__name__}: {exc}"
+            print(msg, flush=True)
+            warnings.append(msg)
+            continue
+        if "hit" not in alternate.columns:
+            continue
+        # 按 index 对齐而不是按行号：打分器没有义务保持行序。
+        lookup = {
+            str(idx): hit
+            for idx, hit in zip(alternate.get("index", alternate.index), alternate["hit"], strict=False)
+        }
+        scored[f"hit__{name}"] = [lookup.get(str(idx)) for idx in scored.get("index", scored.index)]
+    return scored
 
 
 def _with_compliance(

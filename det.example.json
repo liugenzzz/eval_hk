@@ -7,6 +7,12 @@
   "work_dir": "work_dir_det",
   "out_dir": "eval_report_det",
   "cache_dir": "eval_cache_det",
+  "dataset_defaults": {
+    "image_root": "/path/on/eval/server/images",
+    "classes_yaml": "/path/on/eval/server/classes.yaml",
+    "labels_dir": "/path/on/eval/server/labels",
+    "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe"
+  },
   "datasets": {
     "ground_box": {
       "name": "eval_set_v1",
@@ -33,8 +39,7 @@
           }
         ],
         "iou_gate": 0.5,
-        "dev_threshold_pct": 5.0,
-        "image_root": "/path/on/eval/server/images"
+        "dev_threshold_pct": 5.0
       }
     },
     "detect_box": {
@@ -51,8 +56,7 @@
           }
         ],
         "iou_gate": 0.5,
-        "dev_threshold_pct": 5.0,
-        "image_root": "/path/on/eval/server/images"
+        "dev_threshold_pct": 5.0
       }
     },
     "region_identify": {
@@ -67,9 +71,7 @@
             "turn": 1
           }
         ],
-        "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "judge_synonym": true,
-        "image_root": "/path/on/eval/server/images"
+        "judge_synonym": true
       }
     },
     "count_class": {
@@ -90,8 +92,7 @@
             "turn": 1
           }
         ],
-        "dense_from": 6,
-        "image_root": "/path/on/eval/server/images"
+        "dense_from": 6
       }
     },
     "inventory": {
@@ -105,8 +106,7 @@
             ],
             "turn": 1
           }
-        ],
-        "image_root": "/path/on/eval/server/images"
+        ]
       }
     },
     "attribute_qa": {
@@ -121,8 +121,7 @@
             "turn": 1
           }
         ],
-        "judge_synonym": true,
-        "image_root": "/path/on/eval/server/images"
+        "judge_synonym": true
       }
     },
     "exist_negative": {
@@ -136,8 +135,7 @@
             ],
             "turn": 1
           }
-        ],
-        "image_root": "/path/on/eval/server/images"
+        ]
       }
     },
     "describe": {
@@ -169,11 +167,7 @@
             ],
             "turn": 3
           }
-        ],
-        "image_root": "/path/on/eval/server/images",
-        "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe",
-        "labels_dir": "/path/on/eval/server/labels"
+        ]
       }
     },
     "describe_modelhist": {
@@ -205,11 +199,7 @@
             ],
             "turn": 3
           }
-        ],
-        "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "describe_prompt_dir": "/path/on/eval/server/qwen3vl_sft_builder/prompts/describe",
-        "image_root": "/path/on/eval/server/images",
-        "labels_dir": "/path/on/eval/server/labels"
+        ]
       }
     },
     "reverse_consistency": {
@@ -221,9 +211,7 @@
             "turn": 1
           }
         ],
-        "classes_yaml": "/path/on/eval/server/classes.yaml",
-        "judge_synonym": true,
-        "image_root": "/path/on/eval/server/images"
+        "judge_synonym": true
       }
     },
     "question_perturbation": {
@@ -235,8 +223,7 @@
             "turn": 1
           }
         ],
-        "consistent_iou": 0.9,
-        "image_root": "/path/on/eval/server/images"
+        "consistent_iou": 0.9
       }
     }
   },
@@ -391,19 +378,7 @@
     ]
   },
   "infer": {
-    "prompt_files": {
-      "ground_box": "prompts/infer_vqa_raw.txt",
-      "detect_box": "prompts/infer_vqa_raw.txt",
-      "region_identify": "prompts/infer_vqa_raw.txt",
-      "count_class": "prompts/infer_vqa_raw.txt",
-      "inventory": "prompts/infer_vqa_raw.txt",
-      "attribute_qa": "prompts/infer_vqa_raw.txt",
-      "exist_negative": "prompts/infer_vqa_raw.txt",
-      "describe": "prompts/infer_vqa_raw.txt",
-      "describe_modelhist": "prompts/infer_vqa_raw.txt",
-      "reverse_consistency": "prompts/infer_vqa_raw.txt",
-      "question_perturbation": "prompts/infer_vqa_raw.txt"
-    },
+    "prompt_file": "prompts/infer_vqa_raw.txt",
     "max_new_tokens": 1024,
     "image_min_pixels": 65536,
     "image_max_pixels": 589824,
@@ -427,7 +402,10 @@
     "prompt_files": {
       "pointwise": "prompts/judge_equip_pointwise_v4.txt",
       "pairwise": "prompts/judge_equip_pairwise.txt"
-    }
+    },
+    "cross_check": [
+      {"name": "internvl", "api_base": "http://127.0.0.1:18181/v1/chat/completions", "model": "InternVL2-26B"}
+    ]
   },
   "max_workers": 8,
   "do_pointwise": true,

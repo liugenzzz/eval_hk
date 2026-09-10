@@ -411,3 +411,156 @@ def _align_on_source(gold: pd.DataFrame, model_hist: pd.DataFrame) -> tuple[pd.D
         gold[gold[gold_col].astype(str).isin(shared)],
         model_hist[model_hist[source_col].astype(str).isin(shared)],
     )
+
+
+CROSS_HIT_PREFIX = "hit__"
+"""交叉裁判的分数列前缀。``hit__internvl`` = 名为 internvl 的裁判给的 hit。"""
+
+
+def cross_judge_names(details: pd.DataFrame) -> list[str]:
+    """明细表里有哪几路交叉裁判。"""
+    return sorted(
+        column[len(CROSS_HIT_PREFIX):]
+        for column in details.columns
+        if column.startswith(CROSS_HIT_PREFIX) and len(column) > len(CROSS_HIT_PREFIX)
+    )
+
+
+def _spearman(left: pd.Series, right: pd.Series) -> float:
+    """秩相关。自己实现是因为 pandas 的 method="spearman" 要 scipy，而这个工具
+    刻意不依赖 scipy（匈牙利匹配也是自己写的）。并列取平均秩。"""
+    if len(left) < 3:
+        return math.nan
+    a = left.rank(method="average")
+    b = right.rank(method="average")
+    a_dev, b_dev = a - a.mean(), b - b.mean()
+    denom = math.sqrt(float((a_dev**2).sum()) * float((b_dev**2).sum()))
+    # 有一边全是同一个分（裁判把整批判成了 1）时秩没有方差，相关系数没有定义。
+    # 报 nan 而不是 0：0 会被读成「两个裁判毫不相关」，而事实是这批数据分不出来。
+    return float((a_dev * b_dev).sum() / denom) if denom else math.nan
+
+
+def _paired_hits(frame: pd.DataFrame, cross_column: str) -> tuple[pd.Series, pd.Series]:
+    """取两个裁判都打出分的那些行。判失败记的是 None，两边的失败行不一定重合，
+    不取交集就等于拿不同的两批样本比裁判。"""
+    primary = pd.to_numeric(frame.get("hit"), errors="coerce")
+    cross = pd.to_numeric(frame.get(cross_column), errors="coerce")
+    both = primary.notna() & cross.notna()
+    return primary[both], cross[both]
+
+
+def make_judge_agreement(
+    details: pd.DataFrame, min_n: int = MIN_N_FOR_CONCLUSION
+) -> pd.DataFrame:
+    """§15.2 自偏检测：主裁判和异家族裁判逐行比。
+
+    需求文档自己写了这一条做不到 ——「裁判是 Qwen3.8-27B，被测是 Qwen3-VL-8B，同家族，
+    当前无法做自偏检测」。同家族裁判可能偏爱同家族的输出风格，而这件事在单裁判下
+    **看不出来**：分高到底是模型强，还是裁判认亲，一个裁判给不出区分。
+
+    配了 ``judge.cross_check`` 之后每行多一列 ``hit__<名字>``，这张表把它和主裁判
+    的 hit 逐行对齐：
+
+    ==================  ====================================================
+    ``delta``            异家族裁判的均分 − 主裁判的均分。大正数 = 主裁判压分，
+                         大负数 = 主裁判送分（同家族偏爱的典型形状）
+    ``mad``              逐行绝对差的均值。均分相同但 mad 大 = 两个裁判在不同的
+                         样本上给分，只是碰巧抵消了
+    ``agree_rate``       以 0.5 为界的结论一致率
+    ``spearman``         秩相关。它低而 delta 小最危险 —— 两边排序都不一样了
+    ==================  ====================================================
+
+    注意这张表只诊断裁判，不进验收总分：验收分只由 ``engine="code"`` 的数据集构成。
+    """
+    names = cross_judge_names(details) if not details.empty else []
+    if not names or "hit" not in details.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        column = f"{CROSS_HIT_PREFIX}{name}"
+        scoped = details[details[column].notna()]
+        if scoped.empty:
+            continue
+        for (dataset, model), frame in scoped.groupby(["dataset", "model"], sort=True):
+            primary, cross = _paired_hits(frame, column)
+            n = int(len(primary))
+            if not n:
+                continue
+            diff = (cross - primary).abs()
+            agree = ((primary >= 0.5) == (cross >= 0.5)).mean()
+            rows.append({
+                "dataset": str(dataset),
+                "model": str(model),
+                "judge": name,
+                "n": n,
+                "mean_primary": round(float(primary.mean()), 4),
+                "mean_cross": round(float(cross.mean()), 4),
+                "delta": round(float(cross.mean() - primary.mean()), 4),
+                "mad": round(float(diff.mean()), 4),
+                "agree_rate": round(float(agree), 4),
+                "spearman": round(_spearman(primary, cross), 4),
+                "status": OK if n >= min_n else INSUFFICIENT,
+            })
+    return pd.DataFrame(rows)
+
+
+def make_judge_conclusion(
+    details: pd.DataFrame, baseline_model: str, min_n: int = MIN_N_FOR_CONCLUSION
+) -> pd.DataFrame:
+    """交叉裁判会不会推翻结论 —— 这才是自偏检测真正要回答的那一句。
+
+    逐行一致率再难看，只要两个裁判都说「SFT 比 base 高」，结论就站得住；反过来，
+    逐行一致率很高但**增益的符号翻了**，那份增益就不能报。所以这张表算的是同一个
+    对比在两个裁判下各是多少：
+
+    * ``agree``：两边增益同号（都不为 0 时），结论一致
+    * ``flipped``：符号相反 —— 这份增益多半是裁判的家族偏好，不是能力差异
+    * ``insufficient``：任一边样本不够，不下结论
+
+    只跟 ``baseline_model`` 比。三个以上模型时两两比会把表撑爆，而验收要回答的
+    始终是「相对基线涨了没有」。
+    """
+    names = cross_judge_names(details) if not details.empty else []
+    if not names or "hit" not in details.columns or "model" not in details.columns:
+        return pd.DataFrame()
+    rows: list[dict[str, Any]] = []
+    for name in names:
+        column = f"{CROSS_HIT_PREFIX}{name}"
+        scoped = details[details[column].notna()]
+        if scoped.empty:
+            continue
+        for dataset in sorted(set(scoped["dataset"].astype(str))):
+            frame = scoped[scoped["dataset"].astype(str) == dataset]
+            base = frame[frame["model"].astype(str) == str(baseline_model)]
+            if base.empty:
+                continue
+            base_primary, base_cross = _paired_hits(base, column)
+            if not len(base_primary):
+                continue
+            for model in sorted(set(frame["model"].astype(str)) - {str(baseline_model)}):
+                target = frame[frame["model"].astype(str) == model]
+                primary, cross = _paired_hits(target, column)
+                if not len(primary):
+                    continue
+                gain_primary = float(primary.mean() - base_primary.mean())
+                gain_cross = float(cross.mean() - base_cross.mean())
+                n = min(len(primary), len(base_primary))
+                if n < min_n:
+                    verdict = INSUFFICIENT
+                elif gain_primary == 0.0 or gain_cross == 0.0:
+                    verdict = "tie"
+                elif (gain_primary > 0) == (gain_cross > 0):
+                    verdict = "agree"
+                else:
+                    verdict = "flipped"
+                rows.append({
+                    "dataset": dataset,
+                    "model": model,
+                    "baseline": str(baseline_model),
+                    "judge": name,
+                    "gain_primary": round(gain_primary, 4),
+                    "gain_cross": round(gain_cross, 4),
+                    "n": int(n),
+                    "verdict": verdict,
+                })
+    return pd.DataFrame(rows)

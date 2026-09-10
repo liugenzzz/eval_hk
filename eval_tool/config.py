@@ -2,14 +2,21 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from dataclasses import dataclass, field
+import re
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from .artifacts import ArtifactLayout
 from .imaging import validate_image_pixel_bounds
 from .judge import JudgeSettings
 from .prompting import load_prompt_text
+
+
+PRIMARY_JUDGE = "primary"
+"""主裁判在报表里的名字，交叉裁判不许重名。"""
+
+_SAFE_JUDGE_NAME = re.compile(r"[A-Za-z0-9_.\-]{1,40}")
 
 
 class ConfigError(ValueError):
@@ -78,6 +85,9 @@ class EvalConfig:
     dataset_weights: dict[str, float] = field(default_factory=dict)
     # 链路衰减率的数据集配对：[{"gold": "describe", "model": "describe_modelhist"}]
     chain_decay_pairs: list[dict[str, str]] = field(default_factory=list)
+    # 交叉验证用的**额外**裁判。主裁判（judge）出的分仍是 hit，这些各自出一列
+    # hit__<名字>，用来做自偏检测 —— 见 §15.2。
+    cross_check_judges: list[tuple[str, JudgeSettings]] = field(default_factory=list)
     # 打分口径版本。阈值或判据改了就该动它 —— 它进指纹，口径不同的结果不许
     # 画进同一张对比图。
     profile_name: str = ""
@@ -180,6 +190,7 @@ class PipelineConfig:
     empty_cells: dict[str, Any] = field(default_factory=dict)
     dataset_weights: dict[str, float] = field(default_factory=dict)
     chain_decay_pairs: list[dict[str, str]] = field(default_factory=list)
+    cross_check_judges: list[tuple[str, JudgeSettings]] = field(default_factory=list)
     profile_name: str = ""
     profile_version: str = ""
 
@@ -301,6 +312,7 @@ class PipelineConfig:
             empty_cells=dict(self.empty_cells),
             dataset_weights=dict(self.dataset_weights),
             chain_decay_pairs=[dict(p) for p in self.chain_decay_pairs],
+            cross_check_judges=list(self.cross_check_judges),
             profile_name=self.profile_name,
             profile_version=self.profile_version,
         )
@@ -323,7 +335,10 @@ def _optional_min_category_n(raw: dict[str, Any]) -> int | None:
 
 
 def parse_datasets(
-    datasets_raw: Any, *, where: str = "datasets"
+    datasets_raw: Any,
+    *,
+    where: str = "datasets",
+    defaults: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, dict[str, Any]]]:
     """解析 datasets 块，返回 (名称表, kind 表, 参数表)。
 
@@ -335,9 +350,15 @@ def parse_datasets(
                      "params": {"iou_gate": 0.5}}
         }
 
+    ``defaults`` 是顶层 ``dataset_defaults`` 里的公共参数，先铺给每个数据集，数据集
+    自己写的同名键覆盖它。``image_root`` / ``classes_yaml`` / ``labels_dir`` 这几个路径
+    十几个数据集是同一个值，逐个写一遍等于换一次路径要改十几处 —— 漏掉一处不报错，
+    只会让那个数据集悄悄用错的图或错的类别表。
+
     这里只校验形状，不校验 kind 是否已实现 —— 那是 run_eval 起跑前一次性查注册表
     的事，配置层不该 import 打分器（会绕成循环导入，且 --help 也得付代价）。
     """
+    defaults = dict(defaults or {})
     if not isinstance(datasets_raw, dict) or not datasets_raw:
         raise ConfigError(f"{where} must be a non-empty object")
     names: dict[str, str] = {}
@@ -357,12 +378,14 @@ def parse_datasets(
                 raise ConfigError(f"{where}.{key}.params must be an object")
             if kind:
                 kinds[key] = kind
-            if params_raw:
-                params[key] = dict(params_raw)
+            merged = {**defaults, **params_raw}
         else:
             name = str(value).strip()
+            merged = dict(defaults)
         if not name:
             raise ConfigError(f"{where}.{key} must name a dataset")
+        if merged:
+            params[key] = merged
         names[key] = name
     return names, kinds, params
 
@@ -392,7 +415,8 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     base_dir = config_path.parent
 
     datasets, dataset_kinds, dataset_params = parse_datasets(
-        raw.get("datasets") or DEFAULT_DATASETS
+        raw.get("datasets") or DEFAULT_DATASETS,
+        defaults=_parse_dataset_defaults(raw),
     )
     report_dims, empty_cells, dataset_weights, chain_decay_pairs = _parse_report_block(raw)
     profile_name, profile_version = _parse_profile_block(raw)
@@ -463,6 +487,11 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         datasets,
         "infer.prompt_files",
     )
+    shared_prompt = _default_prompt_file(raw)
+    if shared_prompt:
+        # 单数 prompt_file 铺给每个数据集；prompt_files 里点名的优先。
+        shared_path = _resolve_path(shared_prompt, base_dir)
+        prompt_files = {key: prompt_files.get(key, shared_path) for key in datasets}
     limit_raw = infer_raw.get("limit")
     image_min_pixels, image_max_pixels = _config_image_pixel_bounds(infer_raw)
     _assert_training_pixel_budget(infer_raw, image_min_pixels, image_max_pixels)
@@ -480,6 +509,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
     )
 
     judge = _pipeline_judge_settings(raw.get("judge"), base_dir)
+    cross_check_judges = parse_cross_check_judges(raw.get("judge") or {}, judge)
     convert_raw = raw.get("convert") or {}
     if not isinstance(convert_raw, dict):
         raise ConfigError("convert must be an object")
@@ -514,6 +544,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         baseline_model=baseline_model,
         infer=infer,
         judge=judge,
+        cross_check_judges=cross_check_judges,
         convert_input=convert_input,
         max_workers=int(raw.get("max_workers", 8)),
         do_pointwise=bool(raw.get("do_pointwise", True)),
@@ -534,7 +565,9 @@ def load_config(path: str | Path) -> EvalConfig:
     raw = _load_raw_config(path)
     base_dir = path.parent
     datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
-    datasets, dataset_kinds, dataset_params = parse_datasets(datasets_raw)
+    datasets, dataset_kinds, dataset_params = parse_datasets(
+        datasets_raw, defaults=_parse_dataset_defaults(raw)
+    )
     report_dims, empty_cells, dataset_weights, chain_decay_pairs = _parse_report_block(raw)
     profile_name, profile_version = _parse_profile_block(raw)
     models_raw = raw.get("models") or raw.get("MODELS") or []
@@ -571,6 +604,7 @@ def load_config(path: str | Path) -> EvalConfig:
         pointwise_prompt=pointwise_prompt,
         pairwise_prompt=pairwise_prompt,
     )
+    cross_check_judges = parse_cross_check_judges(judge_raw, judge)
     return EvalConfig(
         tsv_dir=_resolve_path(raw.get("tsv_dir") or raw.get("TSV_DIR") or ".", base_dir),
         out_dir=_resolve_path(raw.get("out_dir") or raw.get("OUT_DIR") or "eval_report", base_dir),
@@ -579,6 +613,7 @@ def load_config(path: str | Path) -> EvalConfig:
         models=models,
         baseline_model=str(raw.get("baseline_model") or raw.get("BASELINE_MODEL") or "base"),
         judge=judge,
+        cross_check_judges=cross_check_judges,
         max_workers=int(raw.get("max_workers") or raw.get("MAX_WORKERS") or 8),
         do_pointwise=bool(raw.get("do_pointwise", raw.get("DO_POINTWISE", True))),
         do_pairwise=bool(raw.get("do_pairwise", raw.get("DO_PAIRWISE", True))),
@@ -612,6 +647,10 @@ def load_infer_config(path: str | Path) -> InferConfig:
     datasets, _, dataset_params = parse_datasets(datasets_raw, where="infer.datasets")
     prompt_files_raw = infer_raw.get("prompt_files") or infer_raw.get("PROMPT_FILES") or {}
     prompt_files = {str(k): _resolve_path(v, base_dir) for k, v in prompt_files_raw.items()}
+    shared_prompt = _default_prompt_file(raw)
+    if shared_prompt:
+        shared_path = _resolve_path(shared_prompt, base_dir)
+        prompt_files = {key: prompt_files.get(key, shared_path) for key in datasets}
     limit_value = infer_raw.get("limit") or infer_raw.get("LIMIT")
     gpu_ids = infer_raw.get("gpu_ids") or infer_raw.get("GPU_IDS") or []
     overwrite = _infer_bool(infer_raw, "overwrite", "OVERWRITE", None)
@@ -873,3 +912,84 @@ def _parse_profile_block(raw: dict[str, Any]) -> tuple[str, str]:
     name = str(profile_raw.get("name") or "")
     version = str(profile_raw.get("version") or name)
     return name, version
+
+
+def _parse_dataset_defaults(raw: dict[str, Any]) -> dict[str, Any]:
+    """顶层 ``dataset_defaults``：铺给每个数据集的公共 params。
+
+    ``image_root`` / ``classes_yaml`` / ``labels_dir`` / ``describe_prompt_dir`` 这几个
+    路径，十几个数据集用的是同一个值。写在这里一处，数据集自己只写各自不同的东西
+    （``select`` / ``iou_gate`` / ``judge_synonym`` ……）。
+    """
+    value = raw.get("dataset_defaults") or raw.get("DATASET_DEFAULTS") or {}
+    if not isinstance(value, dict):
+        raise ConfigError("dataset_defaults must be an object")
+    return dict(value)
+
+
+def _default_prompt_file(raw: dict[str, Any]) -> Any:
+    """``infer.prompt_file``（单数）：所有数据集共用同一份推理提示词时写它一处。
+
+    目标检测十一个数据集用的都是 ``{question}`` 原样透传，逐个写 prompt_files 等于把
+    同一行抄十一遍。写了单数就铺给每个数据集；``prompt_files`` 里点名的仍然优先。
+    """
+    infer_raw = raw.get("infer") or raw.get("INFER") or {}
+    if not isinstance(infer_raw, dict):
+        return None
+    return infer_raw.get("prompt_file") or infer_raw.get("PROMPT_FILE")
+
+
+def parse_cross_check_judges(
+    judge_raw: Mapping[str, Any], primary: JudgeSettings
+) -> list[tuple[str, JudgeSettings]]:
+    """``judge.cross_check``：交叉验证用的**额外**裁判。
+
+        "judge": {
+          "api_base": "...", "model": "qwen3.6-27b",
+          "cross_check": [
+            {"name": "internvl", "api_base": "...", "model": "InternVL2-26B"}
+          ]
+        }
+
+    为什么值得做：需求文档 §15.2 写着「裁判是 Qwen3.8-27B，被测是 Qwen3-VL-8B，
+    **同家族** —— 当前无法做自偏检测（没有异家族裁判）」。同家族裁判可能偏爱同家族的
+    输出风格，而这件事在单裁判下**看不出来**。配一个异家族裁判，两边结论一致才说明
+    那是能力差异，只有同家族裁判说好多半是风格偏好。
+
+    每一路只写和主裁判不同的字段，其余继承主裁判（提示词一定继承 —— 换了提示词就不是
+    在比裁判，是在比提示词）。名字必须唯一且不能叫 primary，它是主裁判的保留名。
+    """
+    raw_list = judge_raw.get("cross_check") or []
+    if not isinstance(raw_list, list):
+        raise ConfigError("judge.cross_check must be a list")
+    out: list[tuple[str, JudgeSettings]] = []
+    seen: set[str] = {PRIMARY_JUDGE}
+    for position, item in enumerate(raw_list):
+        if not isinstance(item, dict):
+            raise ConfigError(f"judge.cross_check[{position}] must be an object")
+        name = str(item.get("name") or "").strip()
+        if not name:
+            raise ConfigError(f"judge.cross_check[{position}] needs a name")
+        if not _SAFE_JUDGE_NAME.fullmatch(name):
+            raise ConfigError(
+                f"judge.cross_check[{position}].name 只能用字母数字和 _ - .：{name!r}"
+            )
+        if name in seen:
+            raise ConfigError(f"duplicate cross_check judge name: {name}")
+        seen.add(name)
+        settings = replace(
+            primary,
+            api_base=str(item.get("api_base") or primary.api_base),
+            api_key=str(item.get("api_key") or primary.api_key),
+            model=str(item.get("model") or primary.model),
+            temperature=float(item.get("temperature", primary.temperature)),
+            timeout=int(item.get("timeout", primary.timeout)),
+            max_retries=int(item.get("max_retries", primary.max_retries)),
+        )
+        if settings.fingerprint == primary.fingerprint:
+            raise ConfigError(
+                f"judge.cross_check[{position}] ({name}) 和主裁判指纹相同 —— "
+                "模型、温度、提示词都一样，交叉验证没有意义"
+            )
+        out.append((name, settings))
+    return out
