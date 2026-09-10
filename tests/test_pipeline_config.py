@@ -393,3 +393,23 @@ def test_legacy_eval_config_reads_min_category_n(tmp_path):
     )
 
     assert load_config(path).min_category_n == 12
+
+
+def test_det_example_passes_the_question_through_unchanged():
+    """目标检测的问句本身就是完整指令（「框出图中最左侧的人员」），也是模型训练时
+    看到的样子。不配 prompt_files 会回落到 VQA 的描述性提示词（「完成描述性回答……
+    不要只给通用功能解释」），把模型往写散文上推 —— 那测的不是定位能力。
+    """
+    import json
+    from pathlib import Path
+
+    from eval_tool.config import load_pipeline_config
+    from eval_tool.infer import render_infer_prompt
+
+    config = load_pipeline_config("det.example.json")
+    datasets = json.loads(Path("det.example.json").read_text(encoding="utf-8"))["datasets"]
+    assert set(config.infer.prompt_files) == set(datasets), "有数据集没配推理提示词"
+
+    row = {"question": "框出图中最左侧的人员", "answer": "x", "category": "ground_full"}
+    for key in datasets:
+        assert render_infer_prompt(key, row, config.infer.prompt_files) == row["question"]

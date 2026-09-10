@@ -391,7 +391,19 @@
     ]
   },
   "infer": {
-    "prompt_files": {},
+    "prompt_files": {
+      "ground_box": "prompts/infer_vqa_raw.txt",
+      "detect_box": "prompts/infer_vqa_raw.txt",
+      "region_identify": "prompts/infer_vqa_raw.txt",
+      "count_class": "prompts/infer_vqa_raw.txt",
+      "inventory": "prompts/infer_vqa_raw.txt",
+      "attribute_qa": "prompts/infer_vqa_raw.txt",
+      "exist_negative": "prompts/infer_vqa_raw.txt",
+      "describe": "prompts/infer_vqa_raw.txt",
+      "describe_modelhist": "prompts/infer_vqa_raw.txt",
+      "reverse_consistency": "prompts/infer_vqa_raw.txt",
+      "question_perturbation": "prompts/infer_vqa_raw.txt"
+    },
     "max_new_tokens": 1024,
     "image_min_pixels": 65536,
     "image_max_pixels": 589824,
