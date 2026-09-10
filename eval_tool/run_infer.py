@@ -57,7 +57,10 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
 
     written: dict[str, Path] = {}
     for dataset_key, dataset_name in config.datasets.items():
-        out_path = prediction_output_path(config.out_dir, config.model_name, dataset_name)
+        # 文件名按 pred_stems 走，不是数据集名字：目标检测那八个主线数据集读的是
+        # 同一个 eval_set_v1，按名字命名会全写到同一个 xlsx 里互相覆盖。
+        stem = config.pred_stems.get(dataset_key, dataset_name)
+        out_path = prediction_output_path(config.out_dir, config.model_name, stem)
         if out_path.exists() and not overwrite and not config.resume:
             written[dataset_key] = out_path
             continue

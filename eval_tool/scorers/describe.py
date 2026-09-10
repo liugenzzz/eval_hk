@@ -30,6 +30,7 @@ from typing import Any, Mapping
 
 import pandas as pd
 
+from ..metrics_text import aux_metrics
 from ..classes import ClassTable, load_class_table, table_from_names
 from ..compliance import TEXT
 from ..counting import parse_inventory_gold
@@ -205,6 +206,13 @@ def score_describe(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFrame:
     scored = data.copy()
     for column in rows[0] if rows else []:
         scored[column] = [row[column] for row in rows]
+
+    # 文本重合度四列 judge_text 一直有，describe 漏了 —— 而 describe 也是
+    # pairwise=True，成对判定要读 pred_len，缺了它整趟评估会在最后一步崩掉。
+    aux = [aux_metrics(row.get("answer", ""), row.get("prediction", ""))
+           for _, row in scored.iterrows()]
+    for column in ("bleu1", "bleu2", "rouge_l", "pred_len"):
+        scored[column] = [item[column] for item in aux]
 
     if not ctx.do_pointwise:
         # 代码那三个数一次裁判都不调就能出，它们本来就是最先该看的。

@@ -240,6 +240,34 @@
     "reverse_consistency",
     "question_perturbation"
   ],
+  "derive": [
+    {
+      "dataset": "describe_modelhist",
+      "mode": "model-history",
+      "sample_ratio": 0.3
+    },
+    {
+      "dataset": "reverse_consistency",
+      "mode": "reverse-consistency",
+      "tasks": [
+        "ground_appearance",
+        "ground_full",
+        "ground_relation"
+      ],
+      "pools": {
+        "region_identify": "/path/on/eval/server/qwen3vl_sft_builder/prompts/region_identify/region_identify.txt"
+      }
+    },
+    {
+      "dataset": "question_perturbation",
+      "mode": "question-perturbation",
+      "variants": 3,
+      "sample_ratio": 0.15,
+      "pools": {
+        "ground_appearance": "/path/on/eval/server/qwen3vl_sft_builder/prompts/ground_attribute/ground_attribute.txt"
+      }
+    }
+  ],
   "models": [
     {
       "name": "base",
@@ -404,7 +432,11 @@
       "pairwise": "prompts/judge_equip_pairwise.txt"
     },
     "cross_check": [
-      {"name": "internvl", "api_base": "http://127.0.0.1:18181/v1/chat/completions", "model": "InternVL2-26B"}
+      {
+        "name": "internvl",
+        "api_base": "http://127.0.0.1:18181/v1/chat/completions",
+        "model": "InternVL2-26B"
+      }
     ]
   },
   "max_workers": 8,

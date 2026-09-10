@@ -11,7 +11,7 @@ import pandas as pd
 from .cache import JsonlCache
 from .history import format_history_for_judge, parse_history_cell
 from .judge import JudgeClient
-from .metrics_text import aux_metrics
+from .metrics_text import aux_metrics, tokenize_for_overlap
 
 
 @dataclass(frozen=True)
@@ -195,6 +195,22 @@ def _judge_pairwise_with_retry(
     return {"winner": "tie", "reason": f"[judge_error] {last_err}"}
 
 
+def _with_pred_len(frame: pd.DataFrame) -> pd.DataFrame:
+    """没有 pred_len 就现算一个。
+
+    以前这里直接 ``frame[["index","prediction","pred_len"]]``，打分器少给一列就是
+    KeyError —— 而且是在整趟评估的**最后一步**炸，前面几小时的推理和裁判调用全白跑。
+    长度控制本来就只需要预测文本的词数，这里算和打分器里算是同一个函数。
+    """
+    if "pred_len" in frame.columns:
+        return frame
+    out = frame.copy()
+    out["pred_len"] = [
+        int(len(tokenize_for_overlap(value))) for value in out.get("prediction", [])
+    ]
+    return out
+
+
 def score_pairwise_vs_baseline(
     model_df: pd.DataFrame,
     baseline_df: pd.DataFrame,
@@ -207,8 +223,8 @@ def score_pairwise_vs_baseline(
     progress: bool = True,
 ) -> pd.DataFrame:
     image_map = image_map or {}
-    left = model_df.copy()
-    right = baseline_df[["index", "prediction", "pred_len"]].copy()
+    left = _with_pred_len(model_df)
+    right = _with_pred_len(baseline_df)[["index", "prediction", "pred_len"]].copy()
     right = right.rename(columns={"prediction": "baseline_prediction", "pred_len": "baseline_pred_len"})
     merged = left.merge(right, on="index", how="inner")
     jobs: list[tuple[str, str, dict[str, Any]]] = []

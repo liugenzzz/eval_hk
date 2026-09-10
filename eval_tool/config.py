@@ -5,9 +5,9 @@ import json
 import re
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
-from .artifacts import ArtifactLayout
+from .artifacts import ArtifactLayout, prediction_stems
 from .imaging import validate_image_pixel_bounds
 from .judge import JudgeSettings
 from .prompting import load_prompt_text
@@ -114,6 +114,9 @@ class InferConfig:
     out_dir: Path
     datasets: dict[str, str]
     prompt_files: dict[str, Path]
+    # dataset_key -> 预测文件名主干。几个数据集共用同一个评估集名字时靠它区分，
+    # 否则它们会写到同一个 xlsx 里互相覆盖。空表示按数据集名字命名（旧行为）。
+    pred_stems: dict[str, str] = field(default_factory=dict)
     max_new_tokens: int = 512
     batch_size: int = 1
     limit: int | None = None
@@ -191,6 +194,8 @@ class PipelineConfig:
     dataset_weights: dict[str, float] = field(default_factory=dict)
     chain_decay_pairs: list[dict[str, str]] = field(default_factory=list)
     cross_check_judges: list[tuple[str, JudgeSettings]] = field(default_factory=list)
+    # 派生评估集怎么造。写了 eval_tool all 会自动在两趟推理中间插一步 derive。
+    derive_plans: list[DerivePlan] = field(default_factory=list)
     profile_name: str = ""
     profile_version: str = ""
 
@@ -237,6 +242,9 @@ class PipelineConfig:
                     tsv_dir=self.tsv_dir,
                     out_dir=self.artifacts.model_dir(model.name),
                     datasets=pending_datasets,
+                    # 用**全量** datasets 算，不是 pending 子集：子集里名字可能碰巧
+                    # 唯一了，算出来的文件名就和评估端对不上。
+                    pred_stems=prediction_stems(self.datasets),
                     prompt_files=dict(self.infer.prompt_files),
                     max_new_tokens=self.infer.max_new_tokens,
                     batch_size=self.infer.batch_size,
@@ -263,6 +271,7 @@ class PipelineConfig:
         self, names: list[str] | tuple[str, ...] | None = None
     ) -> EvalConfig:
         selected = self.select_models(names)
+        stems = prediction_stems(self.datasets)
         models: list[ModelConfig] = []
         for model in selected:
             paths: dict[str, str] = {}
@@ -274,9 +283,7 @@ class PipelineConfig:
                     paths[dataset_key] = str(model.pred_paths[dataset_key])
                 else:
                     paths[dataset_key] = str(
-                        self.artifacts.prediction(
-                            model.name, self.datasets[dataset_key]
-                        )
+                        self.artifacts.prediction(model.name, stems[dataset_key])
                     )
             models.append(
                 ModelConfig(
@@ -316,6 +323,129 @@ class PipelineConfig:
             profile_name=self.profile_name,
             profile_version=self.profile_version,
         )
+
+
+DERIVE_MODES = ("model-history", "reverse-consistency", "question-perturbation")
+
+
+@dataclass(frozen=True)
+class DerivePlan:
+    """一份派生评估集怎么造出来。
+
+    派生集（模型历史 / 双向一致性 / 问法扰动）都要「拿模型自己的输出再问一遍」，
+    所以它们**天然是两趟**：先推主线，再造派生集，再推派生集。这不是实现上的将就，
+    是这三个指标的定义 —— 模型还没答，就没有「模型自己的答案」可以拿来追问。
+
+    写进配置之后 ``eval_tool all`` 会自动在两趟推理中间插这一步，不用人工跑 derive。
+    """
+
+    dataset: str
+    mode: str
+    source: str
+    from_model: str = ""
+    pools: dict[str, Path] = field(default_factory=dict)
+    tasks: list[str] = field(default_factory=list)
+    target_turns: dict[str, int] = field(default_factory=dict)
+    sample_ratio: float = 1.0
+    variants: int = 3
+    scale: int = 1000
+
+    @property
+    def needs_predictions(self) -> bool:
+        """问法扰动只换问法，不看模型答了什么，所以它不需要预测。"""
+        return self.mode in ("model-history", "reverse-consistency")
+
+
+def parse_derive_plans(
+    raw: Mapping[str, Any],
+    base_dir: Path,
+    datasets: Mapping[str, str],
+    *,
+    models: Sequence[str] = (),
+    baseline: str = "",
+) -> list[DerivePlan]:
+    """解析顶层 ``derive`` 块。
+
+        "derive": [
+          {"dataset": "describe_modelhist", "mode": "model-history", "sample_ratio": 0.3},
+          {"dataset": "reverse_consistency", "mode": "reverse-consistency",
+           "tasks": ["ground_appearance", "ground_full", "ground_relation"],
+           "pools": {"region_identify": "prompts/region_identify.txt"}}
+        ]
+
+    能省的都给了默认值：``source`` 默认取第一个不是派生产物的数据集（八个主线读的是
+    同一份 test.jsonl）；``from`` 默认取唯一那个非基线模型 —— 派生集要的是**被测模型
+    自己的**输出，拿基线的输出造出来的历史测不出这一轮 SFT 的链路。
+    """
+    raw_list = raw.get("derive") or []
+    if not isinstance(raw_list, list):
+        raise ConfigError("derive must be a list")
+    if not raw_list:
+        return []
+    produced = set()
+    for position, item in enumerate(raw_list):
+        if not isinstance(item, dict):
+            raise ConfigError(f"derive[{position}] must be an object")
+        produced.add(str(item.get("dataset") or ""))
+    default_source = next((key for key in datasets if key not in produced), "")
+    candidates = [name for name in models if name != baseline]
+    default_model = candidates[0] if len(candidates) == 1 else ""
+
+    plans: list[DerivePlan] = []
+    seen: set[str] = set()
+    for position, item in enumerate(raw_list):
+        dataset = str(item.get("dataset") or "").strip()
+        if dataset not in datasets:
+            raise ConfigError(
+                f"derive[{position}].dataset 不在 datasets 里：{dataset!r}"
+            )
+        if dataset in seen:
+            raise ConfigError(f"derive 里同一个数据集出现了两次：{dataset}")
+        seen.add(dataset)
+        mode = str(item.get("mode") or "").strip()
+        if mode not in DERIVE_MODES:
+            raise ConfigError(
+                f"derive[{position}].mode 只能是 {'/'.join(DERIVE_MODES)}：{mode!r}"
+            )
+        source = str(item.get("source") or default_source)
+        if source not in datasets:
+            raise ConfigError(f"derive[{position}].source 不在 datasets 里：{source!r}")
+        if source in produced:
+            raise ConfigError(
+                f"derive[{position}].source 不能是另一份派生集：{source}"
+            )
+        from_model = str(item.get("from") or default_model)
+        pools_raw = item.get("pools") or {}
+        if not isinstance(pools_raw, dict):
+            raise ConfigError(f"derive[{position}].pools must be an object")
+        plan = DerivePlan(
+            dataset=dataset,
+            mode=mode,
+            source=source,
+            from_model=from_model,
+            pools={str(k): _resolve_path(v, base_dir) for k, v in pools_raw.items()},
+            tasks=[str(t) for t in (item.get("tasks") or [])],
+            target_turns={str(k): int(v) for k, v in (item.get("target_turns") or {}).items()},
+            sample_ratio=float(item.get("sample_ratio", 1.0)),
+            variants=int(item.get("variants", 3)),
+            scale=int(item.get("scale", 1000)),
+        )
+        if plan.needs_predictions and not plan.from_model:
+            raise ConfigError(
+                f"derive[{position}] ({dataset}) 要拿模型自己的预测来造，"
+                "但推不出用哪个模型 —— 写上 \"from\": \"sft\"。"
+                "（有且只有一个非基线模型时才会自动认）"
+            )
+        if mode == "reverse-consistency" and not (
+            plan.pools.get("region_identify") or plan.pools.get("default")
+        ):
+            raise ConfigError(
+                f"derive[{position}] 反向一致性需要 pools.region_identify（问法池文件）"
+            )
+        if mode == "question-perturbation" and not plan.pools:
+            raise ConfigError(f"derive[{position}] 问法扰动至少要一个 pools 条目")
+        plans.append(plan)
+    return plans
 
 
 DEFAULT_DATASETS = {"mcq": "aero_mcq", "judge": "aero_judge", "vqa": "aero_vqa"}
@@ -510,6 +640,11 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
 
     judge = _pipeline_judge_settings(raw.get("judge"), base_dir)
     cross_check_judges = parse_cross_check_judges(raw.get("judge") or {}, judge)
+    derive_plans = parse_derive_plans(
+        raw, base_dir, datasets,
+        models=[model.name for model in models],
+        baseline=baseline_model,
+    )
     convert_raw = raw.get("convert") or {}
     if not isinstance(convert_raw, dict):
         raise ConfigError("convert must be an object")
@@ -545,6 +680,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         infer=infer,
         judge=judge,
         cross_check_judges=cross_check_judges,
+        derive_plans=derive_plans,
         convert_input=convert_input,
         max_workers=int(raw.get("max_workers", 8)),
         do_pointwise=bool(raw.get("do_pointwise", True)),
@@ -660,6 +796,7 @@ def load_infer_config(path: str | Path) -> InferConfig:
     )
     _assert_training_pixel_budget(infer_raw, image_min_pixels, image_max_pixels)
     return InferConfig(
+        pred_stems=prediction_stems(datasets),
         model_name=str(infer_raw.get("model_name") or infer_raw.get("MODEL_NAME")),
         model_path=_resolve_path(infer_raw.get("model_path") or infer_raw.get("MODEL_PATH"), base_dir),
         tsv_dir=_resolve_path(infer_raw.get("tsv_dir") or infer_raw.get("TSV_DIR") or ".", base_dir),

@@ -122,7 +122,7 @@ def test_all_without_convert_input_accepts_existing_tsv(tmp_path, monkeypatch):
 def test_all_without_convert_input_rejects_missing_tsv(tmp_path):
     config = _pipeline_config(tmp_path, convert_input=False)
 
-    with pytest.raises(PipelineError, match="missing TSV.*aero_vqa"):
+    with pytest.raises(PipelineError, match="missing TSV/JSONL.*aero_vqa"):
         run_all(config)
 
 

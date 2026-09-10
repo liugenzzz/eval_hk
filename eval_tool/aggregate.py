@@ -10,7 +10,10 @@ import pandas as pd
 def bootstrap_mean_ci(values: Sequence[object], n_bootstrap: int = 1000, seed: int = 42) -> tuple[float, float]:
     """均值的 bootstrap 置信区间。0/1 和连续量共用一套 —— 四点偏差、IoU 都是连续值，
     ``summarize_binary_metric`` 只接受 0/1 的那条路把它们挡在外面了。"""
-    arr = pd.Series(values).dropna().astype(float).to_numpy()
+    # to_numeric 而不是 astype(float)：关掉 pointwise 的裁判组打分器把 hit 记成
+    # pd.NA，astype(float) 会直接抛 TypeError。errors="coerce" 把 NA / None / 非数
+    # 一律变成 NaN，再 dropna 掉。
+    arr = pd.to_numeric(pd.Series(values), errors="coerce").dropna().astype(float).to_numpy()
     if len(arr) == 0:
         return math.nan, math.nan
     if len(arr) == 1:
@@ -45,8 +48,8 @@ def bootstrap_paired_diff_ci(
     两个序列必须**逐位对齐**（同一个下标是同一条样本）。任一边缺值的样本整条丢掉，
     差值就无从谈起。
     """
-    left = pd.Series(challenger).astype(float)
-    right = pd.Series(baseline).astype(float)
+    left = pd.to_numeric(pd.Series(challenger).reset_index(drop=True), errors="coerce")
+    right = pd.to_numeric(pd.Series(baseline).reset_index(drop=True), errors="coerce")
     if len(left) != len(right):
         raise ValueError(f"配对 bootstrap 需要等长的两列，得到 {len(left)} 和 {len(right)}")
     mask = left.notna() & right.notna()
