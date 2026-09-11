@@ -150,3 +150,33 @@ def test_the_legacy_entry_point_still_works():
 
     with pytest.raises(SystemExit):
         main(["--config"])          # 缺值，老解析器自己报错
+
+
+def _multi_model(tmp_path, **extra):
+    config = _tree(tmp_path)
+    raw = json.loads(config.read_text(encoding="utf-8"))
+    raw["models"] = [{"name": "base", "model_path": "models/base"}] + [
+        {"name": f"ckpt_{i}", "model_path": "models/sft"} for i in range(6)
+    ]
+    raw["derive_from"] = "ckpt_5"
+    raw.update(extra)
+    config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return config
+
+
+def test_many_models_warn_about_pairwise_cost(tmp_path):
+    """成对判定是「挑战者 × 基线 × 样本 × 两个方向」，评一串 checkpoint 时是乘出来的。"""
+    result = preflight(load_pipeline_config(_multi_model(tmp_path, do_pairwise=True)))
+    assert result.errors == 0
+    assert any("do_pairwise" in line and "6 个非基线模型" in line for line in result.lines)
+
+
+def test_many_models_warn_that_chain_decay_only_holds_for_one(tmp_path):
+    """派生集只由一个模型造，别的 checkpoint 是「接着它的历史答」，不是各自的链路。"""
+    result = preflight(load_pipeline_config(_multi_model(tmp_path)))
+    assert any("derive_from" in line and "chain_decay" in line for line in result.lines)
+
+
+def test_two_models_do_not_trigger_the_pairwise_warning(tmp_path):
+    result = preflight(load_pipeline_config(_tree(tmp_path)))
+    assert not any("do_pairwise" in line for line in result.lines)

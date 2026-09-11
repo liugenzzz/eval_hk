@@ -251,3 +251,68 @@ def test_the_two_exact_constants_agree():
     from eval_tool.synonym import EXACT as synonym_exact
 
     assert classes_exact == synonym_exact
+
+
+# ------------------------------------------------------------------ derive_from
+
+
+def _many_models_config(tmp_path, extra=None):
+    config = tmp_path / "det.json"
+    raw = {
+        "profile": {"name": "grounding_zh_v1"},
+        "tsv_dir": "d", "work_dir": "w", "out_dir": "o", "cache_dir": "c",
+        "models": [{"name": "base", "model_path": "m"}] + [
+            {"name": f"mbjc_{step}step", "model_path": "m"}
+            for step in (300, 600, 900, 1200, 1500, 1602)
+        ],
+        "baseline_model": "base",
+    }
+    raw.update(extra or {})
+    config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    return config
+
+
+def test_many_checkpoints_need_derive_from(tmp_path):
+    """评一串 checkpoint 时非基线模型有六七个，派生集用谁的预测造，工具不该猜 ——
+    猜错了造出来的历史是另一个 checkpoint 的，而报表上看不出来。"""
+    with pytest.raises(ConfigError) as exc:
+        load_pipeline_config(_many_models_config(tmp_path))
+    message = str(exc.value)
+    assert "derive_from" in message
+    # 报错里要给出可选值和一个能直接抄的写法
+    assert "mbjc_1602step" in message
+    assert "6 个" in message
+
+
+def test_derive_from_sets_every_plan_at_once(tmp_path):
+    """一处写死，三条 derive 规则都用它 —— 不该逼人把同一个名字抄三遍。"""
+    parsed = load_pipeline_config(
+        _many_models_config(tmp_path, {"derive_from": "mbjc_1200step"})
+    )
+    assert {plan.from_model for plan in parsed.derive_plans} == {"mbjc_1200step"}
+
+
+def test_a_single_plan_may_still_override_derive_from(tmp_path):
+    parsed = load_pipeline_config(_many_models_config(tmp_path, {
+        "derive_from": "mbjc_1200step",
+        "derive": [{"dataset": "describe_modelhist", "mode": "model-history",
+                    "from": "mbjc_1602step"}],
+    }))
+    plans = {plan.dataset: plan.from_model for plan in parsed.derive_plans}
+    assert plans["describe_modelhist"] == "mbjc_1602step"
+
+
+def test_derive_from_must_name_a_real_model(tmp_path):
+    with pytest.raises(ConfigError, match="derive_from 指的模型不在 models 里"):
+        load_pipeline_config(_many_models_config(tmp_path, {"derive_from": "typo"}))
+
+
+def test_one_challenger_still_needs_no_derive_from(tmp_path):
+    config = tmp_path / "det.json"
+    config.write_text(json.dumps({
+        "profile": {"name": "grounding_zh_v1"},
+        "tsv_dir": "d", "work_dir": "w", "out_dir": "o", "cache_dir": "c",
+        "models": [{"name": "base", "model_path": "m"}, {"name": "sft", "model_path": "m"}],
+        "baseline_model": "base",
+    }, ensure_ascii=False), encoding="utf-8")
+    assert {p.from_model for p in load_pipeline_config(config).derive_plans} == {"sft"}

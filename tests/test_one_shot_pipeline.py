@@ -99,7 +99,7 @@ def test_derive_plan_infers_source_and_model(tmp_path):
 def test_derive_plan_refuses_to_guess_between_two_challengers(tmp_path):
     """派生集要的是**被测模型自己的**输出。两个候选就别猜 —— 猜错了造出来的历史
     是另一个 checkpoint 的，链路衰减率测的就不是这一轮 SFT。"""
-    with pytest.raises(ConfigError, match="推不出用哪个模型"):
+    with pytest.raises(ConfigError, match="自动认不出来"):
         parse_derive_plans(
             {"derive": [{"dataset": "describe_modelhist", "mode": "model-history"}]},
             tmp_path, _datasets(), models=["base", "sft_ep2", "sft_ep3"], baseline="base",

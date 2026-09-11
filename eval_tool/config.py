@@ -493,7 +493,16 @@ def parse_derive_plans(
         produced.add(str(item.get("dataset") or ""))
     default_source = next((key for key in datasets if key not in produced), "")
     candidates = [name for name in models if name != baseline]
-    default_model = candidates[0] if len(candidates) == 1 else ""
+    # 顶层 derive_from 一处写死用谁的预测造派生集。评一串 checkpoint 时非基线模型有
+    # 六七个，自动认不出来（也不该猜 —— 猜错了造出来的历史是另一个 checkpoint 的，
+    # 而报表上看不出来），但也不该逼人把同一个名字在三条 derive 规则里各写一遍。
+    explicit = str(raw.get("derive_from") or "").strip()
+    if explicit and explicit not in models:
+        raise ConfigError(
+            f"derive_from 指的模型不在 models 里：{explicit!r}。"
+            f"可选：{', '.join(models) or '（models 是空的）'}"
+        )
+    default_model = explicit or (candidates[0] if len(candidates) == 1 else "")
 
     plans: list[DerivePlan] = []
     seen: set[str] = set()
@@ -540,9 +549,12 @@ def parse_derive_plans(
         )
         if plan.needs_predictions and not plan.from_model:
             raise ConfigError(
-                f"derive[{position}] ({dataset}) 要拿模型自己的预测来造，"
-                "但推不出用哪个模型 —— 写上 \"from\": \"sft\"。"
-                "（有且只有一个非基线模型时才会自动认）"
+                f"derive[{position}] ({dataset}) 是拿模型自己的输出再问一遍造出来的，"
+                f"得指定用哪个模型的预测。当前非基线模型有 {len(candidates)} 个"
+                f"（{', '.join(candidates) or '一个都没有'}），自动认不出来。\n"
+                "在配置顶层加一行（推荐，一处管三个派生集）：\n"
+                f'    "derive_from": "{candidates[-1] if candidates else "sft"}"\n'
+                "只有一个非基线模型时会自动认，不用写。"
             )
         if mode == "reverse-consistency" and not (
             plan.pools.get("region_identify") or plan.pools.get("default")

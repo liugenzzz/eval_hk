@@ -50,6 +50,7 @@ class Check:
 def preflight(config: PipelineConfig) -> Check:
     check = Check()
     derived = {plan.dataset for plan in config.derive_plans}
+    challengers = [m.name for m in config.models if m.name != config.baseline_model]
 
     check.lines.append("[评估集]")
     mainline = [key for key in config.enabled_datasets if key not in derived]
@@ -100,6 +101,18 @@ def preflight(config: PipelineConfig) -> Check:
         check.lines.append("")
         check.lines.append("[派生集]")
         root = builder_prompt_root(seen)
+        from_models = {plan.from_model for plan in config.derive_plans if plan.from_model}
+        if len(challengers) > 1 and from_models:
+            # 派生集是拿某一个模型的输出造的，然后所有模型都在这一份上评。对
+            # reverse_consistency 没问题（问的是固定的一批框），但链路衰减率
+            # (chain_decay) 的定义是「模型接着**自己的**历史往下答」，拿 A 的历史
+            # 喂给 B 测出来的不是 B 的链路。
+            check.warn(
+                "derive_from",
+                f"{'/'.join(sorted(from_models))} —— 派生集只由它一个造，"
+                "chain_decay 只对它成立；别的 checkpoint 那几行是「接着它的历史答」，"
+                "不是各自的链路",
+            )
         for plan in config.derive_plans:
             if plan.dataset not in config.enabled_datasets:
                 continue
@@ -124,6 +137,14 @@ def preflight(config: PipelineConfig) -> Check:
         check.ok(f"交叉裁判 {name}", f"{settings.model} @ {settings.api_base}  指纹 {settings.fingerprint}")
     if not config.do_pointwise:
         check.warn("do_pointwise=false", "不调裁判，D 组只出三个代码指标")
+    if config.do_pairwise and len(challengers) > 2:
+        # 成对判定是「每个挑战者 × 基线 × 每条样本 × 正反两个方向」。评一串 checkpoint
+        # 时这个数是乘出来的，而 checkpoint 之间的排序 pointwise 的绝对分就够看了。
+        check.warn(
+            "do_pairwise=true",
+            f"有 {len(challengers)} 个非基线模型，成对判定的裁判调用是它们乘出来的。"
+            "只是想给 checkpoint 排序的话，设成 false 更划算",
+        )
 
     check.lines.append("")
     check.lines.append("[打分器]")
