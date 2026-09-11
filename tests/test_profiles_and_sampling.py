@@ -222,10 +222,20 @@ def test_sample_n_must_be_positive(tmp_path):
 
 @pytest.mark.parametrize("name", ["det.example.json", "book.example.json",
                                   "pipeline.example.json"])
-def test_example_configs_stay_short(name):
-    """示例配置里只该有路径、模型和裁判地址。长了就说明口径又被抄进配置了。"""
-    lines = sum(1 for _ in Path(name).open(encoding="utf-8"))
-    assert lines <= 45, f"{name} 有 {lines} 行，口径应该放进 eval_tool/profiles/"
+def test_example_configs_carry_no_scoring_rules(name):
+    """示例配置里只该有路径、模型和裁判地址。
+
+    不数总行数 —— models 是逐个 checkpoint 列的，评一串 checkpoint 时它本来就长，
+    那是机器特有的东西，长得理直气壮。要拦的是**口径**被抄回配置里：数据集切片规则、
+    报表维度、验收权重、派生规则。
+    """
+    raw = json.loads(Path(name).read_text(encoding="utf-8"))
+    smuggled = [key for key in ("datasets", "enabled_datasets", "report", "derive")
+                if key in raw]
+    assert not smuggled, f"{name} 把 {smuggled} 抄进配置了，应该放进 eval_tool/profiles/"
+    without_models = {k: v for k, v in raw.items() if k != "models"}
+    lines = len(json.dumps(without_models, ensure_ascii=False, indent=2).splitlines())
+    assert lines <= 40, f"{name} 除 models 外有 {lines} 行，还是太长"
 
 
 def test_det_example_still_resolves_to_the_full_eleven_datasets():
