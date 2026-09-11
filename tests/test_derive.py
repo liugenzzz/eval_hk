@@ -265,14 +265,56 @@ def test_predictions_from_several_files_are_merged(tmp_path):
     assert load_predictions([a, b]) == {"x__t1": "一", "x__t2": "二"}
 
 
-def test_conflicting_predictions_for_one_index_are_refused(tmp_path):
-    """静默取后一份会让派生集里混进另一次跑的结果。"""
+def test_one_index_in_two_prediction_files_is_not_an_error(tmp_path):
+    """数据集 select 允许重叠，重叠处必然出现同一个 index 的两份预测。
+
+    内置 profile 里 count_class 和 inventory 都选了 inventory_locate 轮 1：一条样本
+    既判数量也判清单，两个数据集各推理一遍。提示词和模型都一样，但批量推理里一批的
+    组成不同，浮点结果能差出几个字。以前这里直接抛 ValueError，导致 eval_tool all
+    每次跑到 derive 就崩 —— 而配置是仓库自己发的那份，用户无从改起。
+    """
+    a = tmp_path / "count_class.csv"
+    b = tmp_path / "inventory.csv"
+    pd.DataFrame([{"index": "x__t1", "prediction": "一"}]).to_csv(a, index=False)
+    pd.DataFrame([{"index": "x__t1", "prediction": "别的"}]).to_csv(b, index=False)
+
+    assert load_predictions([a, b]) == {"x__t1": "一"}
+
+
+def test_which_duplicate_wins_is_decided_by_file_order(tmp_path):
+    """先出现的那份算数 —— 顺序来自配置，所以同一份配置重跑派生集是同一个。"""
     a = tmp_path / "a.csv"
     b = tmp_path / "b.csv"
     pd.DataFrame([{"index": "x__t1", "prediction": "一"}]).to_csv(a, index=False)
     pd.DataFrame([{"index": "x__t1", "prediction": "别的"}]).to_csv(b, index=False)
-    with pytest.raises(ValueError, match="index 冲突"):
-        load_predictions([a, b])
+
+    assert load_predictions([a, b])["x__t1"] == "一"
+    assert load_predictions([b, a])["x__t1"] == "别的"
+
+
+def test_a_text_clash_is_reported_even_though_it_is_tolerated(tmp_path, capsys):
+    """陈旧的 work_dir 文件混进来时，这行警告是唯一的线索。"""
+    a = tmp_path / "a.csv"
+    b = tmp_path / "b.csv"
+    pd.DataFrame([{"index": "x__t1", "prediction": "一"}]).to_csv(a, index=False)
+    pd.DataFrame([{"index": "x__t1", "prediction": "别的"}]).to_csv(b, index=False)
+
+    load_predictions([a, b])
+
+    out = capsys.readouterr().out
+    assert "x__t1" in out and "取先出现的那份" in out
+
+
+def test_identical_duplicates_say_nothing(tmp_path, capsys):
+    """文本一样就没有可报的 —— 每条 inventory_locate 都刷一行才是噪音。"""
+    a = tmp_path / "a.csv"
+    b = tmp_path / "b.csv"
+    pd.DataFrame([{"index": "x__t1", "prediction": "一"}]).to_csv(a, index=False)
+    pd.DataFrame([{"index": "x__t1", "prediction": "一"}]).to_csv(b, index=False)
+
+    load_predictions([a, b])
+
+    assert capsys.readouterr().out == ""
 
 
 def test_the_model_history_dataset_selects_the_same_turns_as_the_main_one():

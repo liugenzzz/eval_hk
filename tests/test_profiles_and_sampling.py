@@ -332,3 +332,26 @@ def test_one_challenger_still_needs_no_derive_from(tmp_path):
         "baseline_model": "base",
     }, ensure_ascii=False), encoding="utf-8")
     assert {p.from_model for p in load_pipeline_config(config).derive_plans} == {"sft"}
+
+
+def test_the_shipped_detection_profile_really_does_overlap_two_slices():
+    """这是 derive 容忍重复 index 的**理由**，钉在这里免得两边各改各的。
+
+    count_class 和 inventory 都要 inventory_locate 的轮 1：一条样本既判数量也判清单。
+    两个数据集各推理一遍，同一个 index 就有两份预测 —— derive 合并预测时必须接受这件事。
+    """
+    profile = json.loads(
+        (Path("eval_tool/profiles/grounding_zh_v1.json")).read_text(encoding="utf-8")
+    )
+
+    def turn_one_tasks(dataset_key):
+        select = profile["datasets"][dataset_key]["params"]["select"]
+        return {
+            task
+            for rule in select
+            if rule.get("turn") == 1
+            for task in rule.get("task_type", [])
+        }
+
+    shared = turn_one_tasks("count_class") & turn_one_tasks("inventory")
+    assert "inventory_locate" in shared

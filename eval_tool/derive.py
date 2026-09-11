@@ -43,19 +43,44 @@ def load_predictions(paths: Iterable[str | Path]) -> dict[str, str]:
     """把若干份预测文件并成 index -> 预测文本。
 
     一条 inventory_locate 的三轮分散在三个数据集里（清单 / 单框 / 描述），拼模型历史
-    需要前两轮的预测，所以这里接受多份文件。同一个 index 在两份文件里出现是配置错了，
-    直接报错 —— 静默取后一份会让派生集里混进另一次跑的结果。
+    需要前两轮的预测，所以这里接受多份文件。
+
+    **同一个 index 出现在两份文件里是正常的，不是配置错。** 数据集之间的 ``select``
+    本来就允许重叠：内置 profile 里 ``count_class`` 和 ``inventory`` 都选了
+    ``inventory_locate`` 的轮 1 —— 一条样本既要判数量也要判清单。这两个数据集各自
+    推理一遍，同一行就有了两份预测。提示词和模型都一样，但批量推理里一批的组成不同，
+    浮点结果可以差出几个字，于是文本对不上。
+
+    所以重复时**取先出现的那一份**，顺序由调用方给的文件顺序决定（主线是
+    ``enabled_datasets`` 的配置顺序），同一份配置重跑取到的是同一个答案，派生集可复现。
+    文本真的不一致时打一行警告并给个例子 —— 万一是 work_dir 里混了上一次跑的陈旧文件，
+    这行警告是唯一的线索。
     """
     merged: dict[str, str] = {}
+    first_seen: dict[str, str] = {}
+    clashes: list[tuple[str, str, str]] = []
     for path in paths:
         frame = load_prediction_file(path)
         for _, row in frame.iterrows():
             index = str(row["index"])
             prediction = row.get("prediction", "")
             text = "" if prediction is None or pd.isna(prediction) else str(prediction)
-            if index in merged and merged[index] != text:
-                raise ValueError(f"预测文件之间 index 冲突：{index}（{path}）")
+            if index in merged:
+                if merged[index] != text:
+                    clashes.append((index, first_seen[index], str(path)))
+                continue
             merged[index] = text
+            first_seen[index] = str(path)
+    if clashes:
+        index, kept, ignored = clashes[0]
+        print(
+            f"[derive] {len(clashes)} 个 index 在多份预测文件里文本不一致，取先出现的那份。"
+            f"数据集 select 重叠时这是正常的（如 count_class 与 inventory 都含 "
+            f"inventory_locate 轮 1）。例：{index}\n"
+            f"         采用 {kept}\n"
+            f"         忽略 {ignored}",
+            flush=True,
+        )
     return merged
 
 

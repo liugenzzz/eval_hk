@@ -1,21 +1,27 @@
 {
   "profile": {"name": "book_zh_v1", "version": "v1"},
 
-  "tsv_dir": "data/book",
-  "eval_set": "book_vqa",
-  "work_dir": "work_dir_book",
-  "out_dir": "eval_report_book",
-  "cache_dir": "eval_cache_book",
+  "tsv_dir": "data",
+  "eval_set": "book_test",
+  "work_dir": "eval_output/book/book_v1/work_dir_book",
+  "out_dir": "eval_output/book/book_v1/eval_report_book",
+  "cache_dir": "eval_output/book/book_v1/eval_cache_book",
 
-  "dataset_defaults": {"image_root": "/path/on/eval/server/images"},
+  "dataset_defaults": {"image_root": "/code/data_process/book_images"},
 
   "models": [
-    {"name": "base", "model_path": "models/Qwen3-VL-8B-Instruct"},
-    {"name": "sft_ep2", "model_path": "models/sft_ep2"}
+    {"name": "base", "model_path": "/code/model_base/Qwen3-VL-8B-Instruct"},
+    {"name": "book_2000", "model_path": "/code/eval_hk/eval_model/full_train_8b/checkpoint-2000"}
   ],
   "baseline_model": "base",
 
-  "infer": {"image_min_pixels": 65536, "image_max_pixels": 589824},
+  "infer": {
+    "image_min_pixels": 65536,
+    "image_max_pixels": 589824,
+    "gpu_ids": [2, 3, 5],
+    "workers_per_gpu": 3,
+    "batch_size": 4
+  },
 
   "judge": {
     "api_base": "http://127.0.0.1:18180/v1/chat/completions",

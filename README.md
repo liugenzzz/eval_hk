@@ -217,7 +217,7 @@ v1  v2  v3  v3b  v4  v4b
 
 `eval_set` 决定评估集文件叫什么，不用为了迁就配置改文件名；派生集的问法池是 `describe_prompt_dir` 的兄弟目录，自动认；`"sample": {"n": 500, "seed": 42}` 只跑一部分样本（按 id 哈希抽，可复现，八个切片抽到同一批）。
 
-装备和书籍同样有内置 profile（`equip_zh_v1` / `book_zh_v1`），`pipeline.example.json` 和 `book.example.json` 也都缩到 25 行以内。
+装备和书籍同样有内置 profile（`equip_zh_v1` / `book_zh_v1`），`pipeline.example.json` 和 `book.example.json` 里就只剩路径、模型和裁判地址 —— 切片规则、报表维度、加权口径全在 profile 里。
 
 `image_root` 不配的话推理时模型看不见图，框出来的全是废的。评估端会自动跳过图片编码 —— 代码打分器不看图，只有裁判组才读。
 
