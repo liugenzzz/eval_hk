@@ -1,31 +1,64 @@
 {
-  "profile": {"name": "grounding_zh_v1", "version": "v1"},
-
+  "profile": {
+    "name": "grounding_zh_v1",
+    "version": "v1"
+  },
   "tsv_dir": "data",
   "eval_set": "test",
+  "sample": {
+    "n": 1000,
+    "seed": 42
+  },
   "work_dir": "eval_output/det/det_v1/work_dir_det",
   "out_dir": "eval_output/det/det_v1/eval_report_det",
   "cache_dir": "eval_output/det/det_v1/eval_cache_det",
-
   "dataset_defaults": {
     "image_root": "/code/data_process/jsmb_data_0901/images",
     "classes_yaml": "/code/data_process/jsmb_data_0901/classes.yaml",
     "labels_dir": "/code/data_process/jsmb_data_0901/labels",
     "describe_prompt_dir": "/code/qwen3vl_sft_builder/prompts/describe"
   },
-
   "models": [
-    {"name": "base", "model_path": "models/Qwen3-VL-8B-Instruct"},
-    {"name": "sft", "model_path": "models/sft_ep2"}
+    {
+      "name": "base",
+      "model_path": "/code/model_base/Qwen3-VL-8B-Instruct"
+    },
+    {
+      "name": "mbjc_300step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-300"
+    },
+    {
+      "name": "mbjc_600step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-600"
+    },
+    {
+      "name": "mbjc_900step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-900"
+    },
+    {
+      "name": "mbjc_1200step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-1200"
+    },
+    {
+      "name": "mbjc_1500step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-1500"
+    },
+    {
+      "name": "mbjc_1602step",
+      "model_path": "/code/trainspace/output/qwen3-vl-8b/full/mbjc_8b/checkpoint-1602"
+    }
   ],
   "baseline_model": "base",
-
+  "derive_from": "mbjc_1602step",
+  "do_pairwise": false,
   "infer": {
     "image_min_pixels": 65536,
     "image_max_pixels": 589824,
-    "training": {"image_min_pixels": 65536, "image_max_pixels": 589824}
+    "training": {
+      "image_min_pixels": 65536,
+      "image_max_pixels": 589824
+    }
   },
-
   "judge": {
     "api_base": "http://127.0.0.1:18180/v1/chat/completions",
     "api_key": "sk-local",
