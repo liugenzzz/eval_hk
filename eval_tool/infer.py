@@ -51,6 +51,22 @@ class _ProcessorKwargsWarningFilter(logging.Filter):
         return record.getMessage() != _PROCESSOR_KWARGS_WARNING
 
 
+def _force_left_padding(processor: Any) -> None:
+    """把 processor 和它内部的 tokenizer 都设成左补齐。
+
+    ``AutoProcessor.from_pretrained(padding_side="left")`` 在多数版本上会透传给
+    tokenizer，但不是所有版本都会 —— 而这件事错了不会报错，只会让批里较短的那几条
+    预测变成废话。多设一次不花钱，漏设一次查不出来。
+    """
+    for target in (processor, getattr(processor, "tokenizer", None)):
+        if target is None:
+            continue
+        try:
+            target.padding_side = "left"
+        except Exception:  # noqa: BLE001 - 有的实现是只读属性，设不上就算了
+            pass
+
+
 def _install_processor_kwargs_warning_filter() -> None:
     """Hide one noisy Transformers compatibility message, and nothing else."""
 
@@ -119,7 +135,18 @@ class QwenVLGenerator:
                 "Upgrade transformers to a Qwen2.5-VL/Qwen3-VL compatible version."
             )
         self._torch = torch
-        self.processor = transformers.AutoProcessor.from_pretrained(str(self.model_path), trust_remote_code=True)
+        self.processor = transformers.AutoProcessor.from_pretrained(
+            str(self.model_path),
+            trust_remote_code=True,
+            # batch_size > 1 时一批里长短不一的提示词要补齐，**必须从左边补**。
+            # decoder-only 模型是接着序列最后一个 token 往下生成的：右补齐会让短提示词
+            # 后面跟着一串 pad，模型从 pad 后面开始续写，短的那几条答出来的是废话。
+            # transformers 只会打一行警告（"right-padding was detected"），不会报错，
+            # 所以这件事在报表上表现为「这个 checkpoint 好像差一点」，查不出来。
+            padding_side="left",
+        )
+        # 有的 processor 不把 padding_side 透传给内部 tokenizer，补一刀。
+        _force_left_padding(self.processor)
         if self.image_min_pixels is not None:
             try:
                 image_processor = getattr(self.processor, "image_processor", None)

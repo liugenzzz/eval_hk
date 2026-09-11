@@ -401,7 +401,8 @@ def test_qwen_generator_keeps_processor_load_kwargs_and_logs_active_profile(
     )
 
     assert processor_calls == [
-        ((str(tmp_path / "model"),), {"trust_remote_code": True})
+        # padding_side="left" 是必须的：右补齐会让批里较短的提示词答出废话
+        ((str(tmp_path / "model"),), {"trust_remote_code": True, "padding_side": "left"})
     ]
     assert len(model_calls) == 1
     output = capsys.readouterr().out
@@ -464,7 +465,8 @@ def test_qwen_generator_without_pixel_profile_does_not_log_image_profile(
     QwenVLGenerator(model_path=tmp_path / "model")
 
     assert processor_calls == [
-        ((str(tmp_path / "model"),), {"trust_remote_code": True})
+        # padding_side="left" 是必须的：右补齐会让批里较短的提示词答出废话
+        ((str(tmp_path / "model"),), {"trust_remote_code": True, "padding_side": "left"})
     ]
     assert capsys.readouterr().out == ""
 
@@ -718,3 +720,59 @@ def test_run_infer_uses_parallel_branch_without_creating_main_generator(tmp_path
 
     output = pd.read_excel(out_dir / "base_aero_vqa.xlsx", dtype={"index": str})
     assert output.loc[0, "prediction"] == "parallel-pred"
+
+
+def test_the_processor_is_built_with_left_padding(monkeypatch):
+    """batch_size > 1 时一批里长短不一的提示词要补齐，必须从**左边**补。
+
+    decoder-only 模型接着序列最后一个 token 往下生成。右补齐会让短提示词后面跟着
+    一串 pad，模型从 pad 后面开始续写 —— 短的那几条答出来的是废话。transformers 只打
+    一行警告不报错，所以这件事在报表上表现为「这个 checkpoint 好像差一点」，查不出来。
+    """
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class FakeTokenizer:
+        padding_side = "right"
+
+    class FakeAutoProcessor:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            captured["kwargs"] = dict(kwargs)
+            return SimpleNamespace(
+                image_processor=SimpleNamespace(size=None),
+                tokenizer=FakeTokenizer(),
+                padding_side="right",
+            )
+
+    class FakeModelLoader:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            return SimpleNamespace()
+
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(
+        AutoProcessor=FakeAutoProcessor,
+        AutoModelForImageTextToText=FakeModelLoader,
+    ))
+
+    generator = QwenVLGenerator(model_path=Path("unused"))
+
+    assert captured["kwargs"].get("padding_side") == "left"
+    # 有的版本不把它透传给内部 tokenizer，所以我们自己再设一遍
+    assert generator.processor.tokenizer.padding_side == "left"
+    assert generator.processor.padding_side == "left"
+
+
+def test_force_left_padding_survives_read_only_attributes():
+    """有的 processor 实现把 padding_side 做成只读属性。设不上就算了，不能抛。"""
+    from eval_tool.infer import _force_left_padding
+
+    class ReadOnly:
+        @property
+        def padding_side(self):
+            return "right"
+
+    _force_left_padding(ReadOnly())          # 不抛就算过
+    _force_left_padding(None)
