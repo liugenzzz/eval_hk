@@ -130,3 +130,23 @@ def test_a_config_without_an_infer_block_is_still_a_pipeline_config(tmp_path):
     raw.pop("infer", None)
     config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
     assert is_pipeline_config(config)
+
+
+def test_a_typo_in_the_subcommand_says_so(capsys):
+    """敲错子命令（或者代码还没更新）时，老通路会报 "unrecognized arguments: check" ——
+    那看起来像参数写错了，实际上是命令不存在。要直说，并列出有哪些。"""
+    from eval_tool.cli import main
+
+    with pytest.raises(SystemExit) as exc:
+        main(["chekc", "--config", "x.json"])
+    message = str(exc.value)
+    assert "未知的子命令" in message and "chekc" in message
+    assert "check" in message and "git pull" in message
+
+
+def test_the_legacy_entry_point_still_works():
+    """不带子命令、直接 --config 是老装备通路的用法，不能因为上面那个检查坏掉。"""
+    from eval_tool.cli import main
+
+    with pytest.raises(SystemExit):
+        main(["--config"])          # 缺值，老解析器自己报错

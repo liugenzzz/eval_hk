@@ -361,6 +361,15 @@ def main(argv: list[str] | None = None) -> Any:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments in (["-h"], ["--help"]):
         return build_parser().parse_args(arguments)
+    if arguments and arguments[0] not in SUBCOMMANDS and not arguments[0].startswith("-"):
+        # 第一个参数不是选项、又不是已知子命令 —— 用户是想敲子命令但敲错了（或者
+        # 代码是旧的、还没有这个子命令）。落到老通路的话，报的是老解析器的
+        # "unrecognized arguments: check"，看起来像参数写错了，实际上是命令不存在。
+        raise SystemExit(
+            f"未知的子命令：{arguments[0]!r}\n"
+            f"可用的：{', '.join(sorted(SUBCOMMANDS))}\n"
+            "（这个子命令是新加的话，先 git pull 更新代码）"
+        )
     if not arguments or arguments[0] not in SUBCOMMANDS:
         return legacy_eval_main(arguments)
     parser = build_parser()
