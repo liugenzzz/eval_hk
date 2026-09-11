@@ -240,9 +240,8 @@ def test_example_configs_carry_no_scoring_rules(name):
     smuggled = [key for key in ("datasets", "enabled_datasets", "report", "derive")
                 if key in raw]
     assert not smuggled, f"{name} 把 {smuggled} 抄进配置了，应该放进 eval_tool/profiles/"
-    without_models = {k: v for k, v in raw.items() if k != "models"}
-    lines = len(json.dumps(without_models, ensure_ascii=False, indent=2).splitlines())
-    assert lines <= 50, f"{name} 除 models 外有 {lines} 行，还是太长"
+    # 不再数行数：那是代理指标，每加一个合法的机器特有字段（多卡配置、模型列表）
+    # 就得调一次阈值，调的次数比它抓到的问题还多。上面那条才是要守的东西。
 
 
 def test_det_example_still_resolves_to_the_full_eleven_datasets():
