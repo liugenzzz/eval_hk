@@ -284,7 +284,11 @@ def test_the_model_history_dataset_selects_the_same_turns_as_the_main_one():
     import json
     from pathlib import Path
 
-    config = json.loads(Path("det.example.json").read_text(encoding="utf-8"))
+    from eval_tool.config import apply_profile
+
+    # datasets 现在住在内置 profile 里，配置只压路径和模型 —— 读合并后的视图，
+    # 顺带把发出去的那份 profile 也一起锁住。
+    config = apply_profile(json.loads(Path("det.example.json").read_text(encoding="utf-8")))
     datasets = config["datasets"]
     assert (datasets["describe_modelhist"]["params"]["select"]
             == datasets["describe"]["params"]["select"])

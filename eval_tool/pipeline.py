@@ -17,7 +17,7 @@ from .derive import (
     load_predictions,
     write_jsonl,
 )
-from .eval_set import load_records as load_eval_records
+from .eval_set import load_records as load_eval_records, sample_records
 from .io import truth_path
 from .phrase_pool import PhrasePool
 from .run_eval import run as run_eval
@@ -176,14 +176,33 @@ def run_derive(
                 flush=True,
             )
             continue
-        records = load_eval_records(truth_path(config.tsv_dir, config.datasets[plan.source]))
+        # 主线抽了样，派生集要抽同一批 —— 否则问法扰动会拿全量样本去问一遍，
+        # 而模型只答过抽中的那 N 条，剩下的全是缺预测。
+        source_params = config.dataset_params.get(plan.source) or {}
+        sample_n = source_params.get("sample_n")
+        records = sample_records(
+            load_eval_records(truth_path(config.tsv_dir, config.datasets[plan.source])),
+            int(sample_n) if sample_n else None,
+            int(source_params.get("sample_seed", 42)),
+        )
         out_path = config.tsv_dir / f"{config.datasets[plan.dataset]}.jsonl"
         derived = _derive_one(config, plan, records, stems)
         if not derived:
+            sampled = bool(sample_n) or plan.sample_ratio < 1.0
+            if sampled:
+                # 抽了样还一条都派生不出来是正常的：派生要的那几个 task_type 可能
+                # 一条都没抽中。跳过这一个数据集，别把整趟跑挂掉。
+                print(
+                    f"[derive] {plan.dataset}: 抽样之后没有可派生的样本，跳过。"
+                    "要评它就调大 sample.n / sample_ratio。",
+                    flush=True,
+                )
+                continue
+            # 没抽样却派生出空的，那是 from/tasks/pools 配错了。写出一份空评估集
+            # 会让下一趟推理正常跑完，然后报表上多一格「样本不足」—— 而那一格
+            # 实际上是这里配错了。
             raise PipelineError(
-                f"derive {plan.dataset} 产出为空。检查 from/tasks/pools 配得对不对 —— "
-                "写出一份空的评估集，下一趟推理会正常跑完，然后报表上多一格「样本不足」，"
-                "而那一格实际上是这里配错了。"
+                f"derive {plan.dataset} 产出为空。检查 from / tasks / pools 配得对不对。"
             )
         written[plan.dataset] = write_jsonl(derived, out_path)
         print(f"[derive] {plan.dataset}: {len(derived)} 条 -> {out_path}", flush=True)
@@ -266,11 +285,10 @@ def run_all(
     )
     # 派生集必须造在两趟推理中间：它们的内容就是模型自己在第一趟里的输出。
     derived_files = run_derive(config, model_names) if derived else {}
-    if derived_files:
+    produced = [key for key in derived if key in derived_files]
+    if produced:
         second = run_inference(
-            replace(config, enabled_datasets=[
-                key for key in derived if key in derived_files
-            ]),
+            replace(config, enabled_datasets=produced),
             model_names,
             generator_factory,
             overwrite,
@@ -279,10 +297,20 @@ def run_all(
         for model_name, paths in second.items():
             inferred.setdefault(model_name, {}).update(paths)
 
+    # 没造出来的派生集要从评估里摘掉 —— 它的 jsonl 根本不存在，留着会让评估直接
+    # 报文件找不到，而它没造出来的原因（抽样抽空了）本身是正常的。
+    skipped = [key for key in derived if key not in derived_files]
+    for_eval = (
+        replace(config, enabled_datasets=[
+            key for key in config.enabled_datasets if key not in skipped
+        ])
+        if skipped
+        else config
+    )
     evaluated = (
-        run_evaluation(config, model_names)
+        run_evaluation(for_eval, model_names)
         if rubric is None
-        else run_rubric_evaluation(config, rubric, model_names)
+        else run_rubric_evaluation(for_eval, rubric, model_names)
     )
     return {
         "convert": converted,

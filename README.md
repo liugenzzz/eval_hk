@@ -197,17 +197,29 @@ v1  v2  v3  v3b  v4  v4b
 
 不达标的拆三个桶，加起来 = 1 − 达标率：`malformed`（格式不合规，训练配置问题）/ `localize_fail`（框到别的目标，补指代消歧和密集场景）/ `deviation`（框对了不够准，看 `bias_*` 定方向）。
 
-**跑之前必配三个路径**。十一个数据集用的是同一份图和同一张类别表，所以写在顶层 `dataset_defaults` 一处，自动铺给每个数据集（数据集自己写的同名键仍然优先）：
+**配置只写这台机器特有的东西。** 评估口径（八个切片怎么分、报表拆哪些维度、验收权重）在内置 profile `eval_tool/profiles/grounding_zh_v1.json` 里，不用抄进配置 —— `det.example.json` 全文 38 行：
 
 ```json
-"dataset_defaults": {
-  "image_root":   "/评估机器上的/images",         ← 推理端一律要图
-  "classes_yaml": "/评估机器上的/classes.yaml",   ← 不配 E 组主指标会偏高
-  "labels_dir":   "/评估机器上的/labels"          ← 配了 CHAIR 才有数
+{
+  "profile": {"name": "grounding_zh_v1", "version": "v1"},
+  "tsv_dir": "data",
+  "eval_set": "test",
+  "dataset_defaults": {
+    "image_root":          "/data/eval/images",
+    "classes_yaml":        "/data/eval/classes.yaml",
+    "labels_dir":          "/data/eval/labels",
+    "describe_prompt_dir": "/data/builder/prompts/describe"
+  },
+  "models": [{"name": "base", "model_path": "..."}, {"name": "sft", "model_path": "..."}],
+  "baseline_model": "base"
 }
 ```
 
-`image_root` 不配的话推理时模型看不见图，框出来的全是废的。评估端会自动跳过图片编码 —— 代码打分器不看图，只有裁判组才读。推理提示词同理：这十一个数据集都是原样透传问句，写一处 `infer.prompt_file`（单数）铺给全部，不用把同一行抄十一遍。
+`eval_set` 决定评估集文件叫什么，不用为了迁就配置改文件名；派生集的问法池是 `describe_prompt_dir` 的兄弟目录，自动认；`"sample": {"n": 500, "seed": 42}` 只跑一部分样本（按 id 哈希抽，可复现，八个切片抽到同一批）。
+
+装备和书籍同样有内置 profile（`equip_zh_v1` / `book_zh_v1`），`pipeline.example.json` 和 `book.example.json` 也都缩到 25 行以内。
+
+`image_root` 不配的话推理时模型看不见图，框出来的全是废的。评估端会自动跳过图片编码 —— 代码打分器不看图，只有裁判组才读。
 
 **有第二个裁判就配上交叉验证**。需求文档自己写了一条做不到的局限：裁判和被测同家族，没法做自偏检测 —— 分高到底是模型强还是裁判认亲，一个裁判分不出来。配一路异家族裁判就补上了：
 

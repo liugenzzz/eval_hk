@@ -1,0 +1,23 @@
+{
+  "datasets": {
+    "mcq": {"name": "aero_mcq", "kind": "choice"},
+    "judge": {"name": "aero_judge", "kind": "choice", "params": {"choice_style": "judge"}},
+    "vqa": {"name": "aero_vqa", "kind": "judge_text"}
+  },
+  "enabled_datasets": ["mcq", "judge", "vqa"],
+  "infer": {
+    "prompt_files": {
+      "mcq": "prompts/infer_mcq.txt",
+      "judge": "prompts/infer_judge.txt",
+      "vqa": "prompts/infer_vqa_raw.txt"
+    },
+    "max_new_tokens": 1024
+  },
+  "judge": {
+    "prompt_files": {
+      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
+      "pairwise": "prompts/judge_equip_pairwise.txt"
+    }
+  },
+  "category_weights": {"P1": 1.0, "P2": 1.0, "P3": 1.0, "R1": 1.0, "R2": 1.0, "R3": 1.0}
+}

@@ -287,6 +287,31 @@ def _encode_images(
     return encode_image_cell(encoded) if encoded else ""
 
 
+def sample_records(
+    records: Sequence[Mapping[str, Any]], sample_n: int | None, seed: int = 42
+) -> list[dict[str, Any]]:
+    """确定性抽样：按 ``sha256(seed|id)`` 排序取前 ``sample_n`` 条。
+
+    为什么不用 ``random.sample``：评估集加了一条样本、或者记录顺序变了，抽中的那一批
+    就会整个换掉，两次评估算在不同的子集上没法比。按 id 哈希排序则只跟 id 和种子有关，
+    换台机器、换个顺序，抽出来的还是同一批。
+
+    **抽的是原始记录，不是展开后的行。** 一条多轮样本会被拆成好几行分给好几个数据集
+    （轮 1 的框归 ground_box、轮 2 的描述归 describe）。在行上抽，八个数据集看到的就是
+    八批不同的样本，报表横着对不起来；在记录上抽，它们看到的是同一批。
+    """
+    if sample_n is None or sample_n <= 0 or sample_n >= len(records):
+        return [dict(record) for record in records]
+    salt = str(seed)
+    ranked = sorted(
+        records,
+        key=lambda record: hashlib.sha256(
+            f"{salt}|{record.get('id', '')}".encode("utf-8")
+        ).digest(),
+    )
+    return [dict(record) for record in ranked[:sample_n]]
+
+
 def load_eval_set(
     path: str | Path,
     *,
@@ -294,8 +319,10 @@ def load_eval_set(
     image_root: str | Path | None = None,
     category_field: str | None = None,
     default_category: str = DEFAULT_CATEGORY,
+    sample_n: int | None = None,
+    sample_seed: int = 42,
 ) -> pd.DataFrame:
-    records = load_records(path)
+    records = sample_records(load_records(path), sample_n, sample_seed)
     cache: dict[str, str] = {}
     root = Path(image_root) if image_root else None
     rows: list[dict[str, Any]] = []
@@ -326,8 +353,18 @@ def load_eval_set(
     if no_turns:
         print(f"[eval_set] {path}: 跳过 {no_turns} 条没有可用问答轮次的记录", flush=True)
     if not rows:
-        # 选空了是配置写错了（任务名拼错、轮次填反），静默返回空表会让报表里多一格
-        # 「样本不足」，而那格实际上是 bug。
+        if sample_n:
+            # 抽样之后某个切片一条不剩是正常的：稀有任务（比如整份数据里只有几十条
+            # count_class）在 500 条的抽样里可能一条都没抽到。这不是配置错，
+            # 报错会让「先抽一点跑通」这件事变得没法做。返回空表，上层跳过这个数据集。
+            print(
+                f"[eval_set] {path}: 抽样 {sample_n} 条之后这个切片没有样本，跳过。"
+                f"要评它就调大 sample.n 或去掉抽样。",
+                flush=True,
+            )
+            return pd.DataFrame(columns=["index", "question", "answer", "image"])
+        # 没抽样却选空了，那就是配置写错了（任务名拼错、轮次填反）。静默返回空表会让
+        # 报表里多一格「样本不足」，而那格实际上是 bug。
         raise ValueError(f"{path}: select 没有选中任何样本，检查 task_type 和 turn")
     frame = pd.DataFrame(rows)
     frame["index"] = frame["index"].astype(str)

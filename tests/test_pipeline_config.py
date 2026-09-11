@@ -403,11 +403,13 @@ def test_det_example_passes_the_question_through_unchanged():
     import json
     from pathlib import Path
 
-    from eval_tool.config import load_pipeline_config
+    from eval_tool.config import apply_profile, load_pipeline_config
     from eval_tool.infer import render_infer_prompt
 
     config = load_pipeline_config("det.example.json")
-    datasets = json.loads(Path("det.example.json").read_text(encoding="utf-8"))["datasets"]
+    datasets = apply_profile(
+        json.loads(Path("det.example.json").read_text(encoding="utf-8"))
+    )["datasets"]
     assert set(config.infer.prompt_files) == set(datasets), "有数据集没配推理提示词"
 
     row = {"question": "框出图中最左侧的人员", "answer": "x", "category": "ground_full"}

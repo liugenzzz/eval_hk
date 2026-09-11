@@ -87,12 +87,16 @@ def load_truth_dataset(
         kwargs: dict[str, Any] = {}
         if params.get("default_category"):
             kwargs["default_category"] = str(params["default_category"])
+        sample_n = params.get("sample_n")
         return normalize_index(
             load_eval_set(
                 path,
                 select=params.get("select"),
                 image_root=params.get("image_root") if need_images else None,
                 category_field=params.get("category_field"),
+                # 抽样在**记录**层做，所以同一份评估集的几个切片看到的是同一批样本。
+                sample_n=int(sample_n) if sample_n else None,
+                sample_seed=int(params.get("sample_seed", 42)),
                 **kwargs,
             )
         )

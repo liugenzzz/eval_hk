@@ -325,6 +325,82 @@ class PipelineConfig:
         )
 
 
+PROFILE_DIR = Path(__file__).resolve().parent / "profiles"
+
+
+def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """override 压在 base 上。两边都是字典就逐键合并，其余（含列表）整个替换。
+
+    列表不合并是有意的：``enabled_datasets`` 写了就是「只跑这几个」，合并的话就没法
+    从 profile 里减掉任何一个。想加一个数据集写 ``datasets``（字典，会合并），想改跑
+    哪几个写 ``enabled_datasets``（列表，整个替换）。
+    """
+    merged = dict(base)
+    for key, value in override.items():
+        current = merged.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge(current, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _strip_nulls(value: Any) -> Any:
+    """profile 里写 null 表示「这一项由配置提供」，合并完还是 null 就当没写过。"""
+    if isinstance(value, Mapping):
+        return {k: _strip_nulls(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list):
+        return [_strip_nulls(item) for item in value]
+    return value
+
+
+def apply_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """``profile.name`` 指向一份内置配置，用户写的压在它上面。
+
+    为什么要有这个：目标检测那条路的 ``datasets`` / ``derive`` / ``report`` 加起来
+    四百行，而里面**没有一行是这台机器特有的** —— 八个切片按 task_type 怎么分、报表
+    按哪几个维度拆、验收权重各是多少，这些是这套评估的定义，不是环境。让每个人把它
+    抄一遍，等于每次改口径都要追着所有人的配置改。
+
+    机器特有的只有路径、模型和裁判地址。写进配置的就该只有这些。
+
+    ``eval_set``（顶层）把 profile 里所有数据集的评估集名字换掉，这样评估集文件叫
+    什么都行，不用为了迁就配置去改文件名。
+    """
+    profile_raw = raw.get("profile") or raw.get("PROFILE") or {}
+    if isinstance(profile_raw, str):
+        profile_raw = {"name": profile_raw}
+    if not isinstance(profile_raw, Mapping):
+        raise ConfigError("profile must be an object or a string")
+    name = str(profile_raw.get("name") or "").strip()
+    if not name:
+        return dict(raw)
+    path = PROFILE_DIR / f"{name}.json"
+    if not path.is_file():
+        available = sorted(item.stem for item in PROFILE_DIR.glob("*.json"))
+        # 没有这个 profile 时不能静默当成「没写」—— 那样 datasets 是空的，跑出来
+        # 是一份空报表，而配置看着一切正常。
+        raise ConfigError(
+            f"未知的 profile：{name!r}。内置的有：{', '.join(available) or '（无）'}。"
+            "自定义评估直接写 datasets，不要写 profile.name。"
+        )
+    profile = json.loads(path.read_text(encoding="utf-8"))
+    merged = _strip_nulls(_deep_merge(profile, raw))
+
+    eval_set = str(raw.get("eval_set") or "").strip()
+    if eval_set:
+        derived = {
+            str(plan.get("dataset")) for plan in (merged.get("derive") or [])
+            if isinstance(plan, Mapping)
+        }
+        for key, value in (merged.get("datasets") or {}).items():
+            # 派生集的文件是工具自己造的，名字由它自己定，不跟着改。
+            if key in derived or not isinstance(value, dict):
+                continue
+            value["name"] = eval_set
+    return merged
+
+
 DERIVE_MODES = ("model-history", "reverse-consistency", "question-perturbation")
 
 
@@ -356,6 +432,33 @@ class DerivePlan:
         return self.mode in ("model-history", "reverse-consistency")
 
 
+def builder_prompt_root(defaults: Mapping[str, Any]) -> Path | None:
+    """构建端 prompts 目录。从 ``describe_prompt_dir`` 的上一级推出来。
+
+    D 组范围合规读的是 ``<构建端>/prompts/describe``，派生集的问法池读的是同一个
+    ``prompts`` 下的 ``region_identify/`` 和 ``ground_attribute/``。配置里已经为了
+    D 组写过一次那个路径了，再让人把兄弟目录抄两遍没有道理 —— 抄错一个字，派生集
+    就整个产不出来，而报错要等到推理跑完之后。
+    """
+    value = defaults.get("describe_prompt_dir")
+    return Path(str(value)).parent if value else None
+
+
+def _resolve_pool(value: Any, prompt_root: Path | None, base_dir: Path) -> Path:
+    """问法池路径。相对路径先按构建端的 prompts 目录解，再回落到配置文件旁边。
+
+    profile 里存的是 ``region_identify/region_identify.txt`` 这样的相对路径 —— 它是
+    构建端的目录结构，跟机器无关。而配置里为了 D 组范围合规已经写过
+    ``describe_prompt_dir`` 了，它的上一级就是这个根。**所以这两个路径不用配。**
+    """
+    raw_path = Path(str(value))
+    if not raw_path.is_absolute() and prompt_root is not None:
+        candidate = prompt_root / raw_path
+        if candidate.is_file():
+            return candidate
+    return _resolve_path(value, base_dir)
+
+
 def parse_derive_plans(
     raw: Mapping[str, Any],
     base_dir: Path,
@@ -363,6 +466,7 @@ def parse_derive_plans(
     *,
     models: Sequence[str] = (),
     baseline: str = "",
+    prompt_root: Path | None = None,
 ) -> list[DerivePlan]:
     """解析顶层 ``derive`` 块。
 
@@ -418,12 +522,16 @@ def parse_derive_plans(
         pools_raw = item.get("pools") or {}
         if not isinstance(pools_raw, dict):
             raise ConfigError(f"derive[{position}].pools must be an object")
+        pools_raw = dict(pools_raw)
         plan = DerivePlan(
             dataset=dataset,
             mode=mode,
             source=source,
             from_model=from_model,
-            pools={str(k): _resolve_path(v, base_dir) for k, v in pools_raw.items()},
+            pools={
+                str(k): _resolve_pool(v, prompt_root, base_dir)
+                for k, v in pools_raw.items()
+            },
             tasks=[str(t) for t in (item.get("tasks") or [])],
             target_turns={str(k): int(v) for k, v in (item.get("target_turns") or {}).items()},
             sample_ratio=float(item.get("sample_ratio", 1.0)),
@@ -443,7 +551,11 @@ def parse_derive_plans(
                 f"derive[{position}] 反向一致性需要 pools.region_identify（问法池文件）"
             )
         if mode == "question-perturbation" and not plan.pools:
-            raise ConfigError(f"derive[{position}] 问法扰动至少要一个 pools 条目")
+            raise ConfigError(
+                f"derive[{position}] 问法扰动至少要一个 pools 条目"
+                + (f"（也可以把问法池放到 {prompt_root}/ground_attribute/"
+                   "ground_attribute.txt，会自动认）" if prompt_root else "")
+            )
         plans.append(plan)
     return plans
 
@@ -541,12 +653,13 @@ def is_pipeline_config(path: str | Path) -> bool:
 
 def load_pipeline_config(path: str | Path) -> PipelineConfig:
     config_path = Path(path).resolve()
-    raw = _load_raw_config(config_path)
+    raw = apply_profile(_load_raw_config(config_path))
     base_dir = config_path.parent
 
+    dataset_defaults = _parse_dataset_defaults(raw)
     datasets, dataset_kinds, dataset_params = parse_datasets(
         raw.get("datasets") or DEFAULT_DATASETS,
-        defaults=_parse_dataset_defaults(raw),
+        defaults=dataset_defaults,
     )
     report_dims, empty_cells, dataset_weights, chain_decay_pairs = _parse_report_block(raw)
     profile_name, profile_version = _parse_profile_block(raw)
@@ -644,6 +757,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         raw, base_dir, datasets,
         models=[model.name for model in models],
         baseline=baseline_model,
+        prompt_root=builder_prompt_root(dataset_defaults),
     )
     convert_raw = raw.get("convert") or {}
     if not isinstance(convert_raw, dict):
@@ -698,7 +812,7 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
 
 def load_config(path: str | Path) -> EvalConfig:
     path = Path(path)
-    raw = _load_raw_config(path)
+    raw = apply_profile(_load_raw_config(path))
     base_dir = path.parent
     datasets_raw = raw.get("datasets") or raw.get("DATASETS") or DEFAULT_DATASETS
     datasets, dataset_kinds, dataset_params = parse_datasets(
@@ -774,7 +888,7 @@ def load_config(path: str | Path) -> EvalConfig:
 
 def load_infer_config(path: str | Path) -> InferConfig:
     path = Path(path)
-    raw = _load_raw_config(path)
+    raw = apply_profile(_load_raw_config(path))
     base_dir = path.parent
     infer_raw = raw.get("infer") or raw.get("INFER") or raw
     datasets_raw = infer_raw.get("datasets") or infer_raw.get("DATASETS") or DEFAULT_DATASETS
@@ -1061,7 +1175,21 @@ def _parse_dataset_defaults(raw: dict[str, Any]) -> dict[str, Any]:
     value = raw.get("dataset_defaults") or raw.get("DATASET_DEFAULTS") or {}
     if not isinstance(value, dict):
         raise ConfigError("dataset_defaults must be an object")
-    return dict(value)
+    defaults = dict(value)
+
+    # 顶层 "sample": {"n": 500, "seed": 42} —— 抽一部分样本跑。铺给每个数据集，
+    # 这样同一份评估集的几个切片抽到的是**同一批**原始样本，报表横着才对得起来。
+    sample = raw.get("sample") or {}
+    if not isinstance(sample, dict):
+        raise ConfigError('sample must be an object, e.g. {"n": 500, "seed": 42}')
+    if sample:
+        count = sample.get("n", sample.get("N"))
+        if count is not None:
+            if int(count) <= 0:
+                raise ConfigError(f"sample.n 要是正整数，得到 {count!r}")
+            defaults.setdefault("sample_n", int(count))
+        defaults.setdefault("sample_seed", int(sample.get("seed", 42)))
+    return defaults
 
 
 def _default_prompt_file(raw: dict[str, Any]) -> Any:
@@ -1122,11 +1250,32 @@ def parse_cross_check_judges(
             temperature=float(item.get("temperature", primary.temperature)),
             timeout=int(item.get("timeout", primary.timeout)),
             max_retries=int(item.get("max_retries", primary.max_retries)),
+            # label 只给交叉裁判：它把这一路的判词缓存和主裁判隔开。同一个 model 名字
+            # 跑在两个端口上（不同 checkpoint、不同量化）时，没有 label 就会共用缓存，
+            # 第二路直接读到第一路的判词，报出「两个裁判完全一致」。
+            label=name,
         )
-        if settings.fingerprint == primary.fingerprint:
+        same_endpoint = settings.api_base == primary.api_base
+        same_judge = (
+            settings.model == primary.model
+            and settings.temperature == primary.temperature
+            and settings.pointwise_prompt == primary.pointwise_prompt
+            and settings.pairwise_prompt == primary.pairwise_prompt
+        )
+        if same_judge and same_endpoint:
             raise ConfigError(
-                f"judge.cross_check[{position}] ({name}) 和主裁判指纹相同 —— "
-                "模型、温度、提示词都一样，交叉验证没有意义"
+                f"judge.cross_check[{position}] ({name}) 和主裁判完全一样 —— "
+                "同一个地址、同一个模型、同一份提示词，判两遍只是把开销翻倍"
+            )
+        if same_judge:
+            # 端口不同、模型名相同：可能是同一个模型的两个 checkpoint，也可能是同一份
+            # 权重起了两份。前者有意义（测的是 checkpoint 差异），后者只测服务抖动 ——
+            # 都不是异家族自偏检测。不拦，但要说清楚它测的是什么。
+            print(
+                f"[judge:{name}] 提示：模型名和温度都与主裁判相同，只有地址不同。"
+                "这一路测的是服务/权重差异，不是异家族偏置 —— §15.2 的自偏检测需要"
+                "换一个**别的家族**的裁判模型。",
+                flush=True,
             )
         out.append((name, settings))
     return out

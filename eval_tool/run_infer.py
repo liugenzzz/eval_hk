@@ -73,6 +73,11 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
             )
             if config.limit is not None:
                 data = data.head(config.limit).copy()
+            if data.empty:
+                # 抽样之后这个切片一条不剩（见 eval_set 里的说明）。推一份空的预测
+                # 没有意义，评估端也会跳过同一个数据集。
+                print(f"[infer] {dataset_name} / {dataset_key}: 没有样本，跳过", flush=True)
+                continue
             rows = data.to_dict("records")
             missing_count, missing_sample = count_missing_images(rows)
         except Exception as exc:

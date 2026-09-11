@@ -39,6 +39,11 @@ class JudgeSettings:
     max_retries: int = 3
     pointwise_prompt: str = VQA_JUDGE_PROMPT
     pairwise_prompt: str = PAIRWISE_JUDGE_PROMPT
+    # 交叉裁判的名字。**只有非空时才进指纹** —— 主裁判永远是空字符串，所以已有的
+    # 判词缓存一条都不会失效。给交叉裁判一个独立的缓存命名空间：同一个模型跑在两个
+    # 端口上（不同 checkpoint、不同量化）时 model 字段一样，不隔开的话第二路会直接
+    # 读到第一路的判词，然后报出「两个裁判完全一致」—— 那是缓存串了，不是结论。
+    label: str = ""
 
     @property
     def fingerprint(self) -> str:
@@ -55,6 +60,9 @@ class JudgeSettings:
             hashlib.sha256(self.pointwise_prompt.encode("utf-8")).hexdigest()[:12],
             hashlib.sha256(self.pairwise_prompt.encode("utf-8")).hexdigest()[:12],
         ])
+        # 空 label 不进 blob：主裁判的指纹保持和以前逐位相同，旧缓存照常命中。
+        if self.label:
+            blob = f"{blob}|@{self.label}"
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 

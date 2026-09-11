@@ -20,7 +20,6 @@ import pandas as pd
 
 from ..classes import EXACT, HYPERNYM, HYPONYM, OFF_TABLE, OTHER, ClassTable, load_class_table, table_from_names
 from ..compliance import TEXT
-from ..synonym import EXACT
 from . import CODE, ScoringContext, register, resolve_path
 from . import _synonym_fallback
 

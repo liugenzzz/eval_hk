@@ -50,12 +50,35 @@ def test_cross_check_judge_inherits_every_field_it_does_not_override():
 
 
 def test_cross_check_judge_identical_to_primary_is_rejected():
-    """指纹相同 = 同一个裁判判两遍。这不是交叉验证，只是把裁判开销翻倍。"""
+    """同地址 + 同模型 + 同提示词 = 同一个裁判判两遍，只是把开销翻倍。"""
     primary = JudgeSettings(model="qwen3.6-27b")
-    with pytest.raises(ConfigError, match="指纹相同"):
+    with pytest.raises(ConfigError, match="和主裁判完全一样"):
         parse_cross_check_judges(
             {"cross_check": [{"name": "same", "model": "qwen3.6-27b"}]}, primary
         )
+
+
+def test_same_model_on_another_endpoint_is_allowed_but_flagged(capsys):
+    """同一个模型名跑在两个端口上：可能是两个 checkpoint，也可能只是两份权重。
+
+    不拦（工具分不出来），但要说清它测的是服务差异不是异家族偏置。**关键是缓存不能
+    串** —— 判词缓存的键第一位是裁判指纹，两路指纹一样的话第二路会直接读到第一路的
+    判词，然后报出「两个裁判完全一致」。
+    """
+    primary = JudgeSettings(api_base="http://127.0.0.1:18180/v1", model="qwen3.6-27b")
+    judges = parse_cross_check_judges(
+        {"cross_check": [{"name": "qwen_v1", "api_base": "http://127.0.0.1:18181/v1",
+                          "model": "qwen3.6-27b"}]},
+        primary,
+    )
+    assert judges[0][1].fingerprint != primary.fingerprint
+    assert "服务/权重差异" in capsys.readouterr().out
+
+
+def test_primary_judge_fingerprint_never_changes():
+    """label 只给交叉裁判。主裁判的 label 是空字符串，不进指纹 —— 装备/书籍攒下来的
+    判词缓存一条都不许失效。"""
+    assert JudgeSettings(model="qwen3.6-27b").fingerprint == "3359d2c48a278d67"
 
 
 def test_cross_check_judge_may_differ_only_by_temperature():

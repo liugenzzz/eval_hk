@@ -1,0 +1,39 @@
+{
+  "datasets": {
+    "book_vqa": {
+      "name": "book_vqa",
+      "kind": "judge_text",
+      "params": {
+        "category_field": "category",
+        "default_category": "未分类"
+      }
+    }
+  },
+  "enabled_datasets": [
+    "book_vqa"
+  ],
+  "infer": {
+    "prompt_file": "prompts/infer_vqa_raw.txt",
+    "max_new_tokens": 1024
+  },
+  "judge": {
+    "prompt_files": {
+      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
+      "pairwise": "prompts/judge_equip_pairwise.txt"
+    }
+  },
+  "report": {
+    "dims": [
+      {
+        "key": "category",
+        "from": "category",
+        "min_n": 10
+      }
+    ]
+  },
+  "min_category_n": 10,
+  "category_weights": {
+    "作战应用": 1.0,
+    "拱形基础": 1.0
+  }
+}

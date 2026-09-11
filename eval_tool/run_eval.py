@@ -50,6 +50,14 @@ def run(config: EvalConfig) -> dict[str, Path]:
         )
         for dataset_key, spec in plan
     }
+    # 抽样之后可能有切片一条不剩（稀有任务没抽到）。带着空表往下走，打分器会在
+    # rows[0] 之类的地方炸；这里直接把它们从计划里摘掉，报表少一个数据集而已。
+    empty = [key for key, frame in truth.items() if frame.empty]
+    if empty:
+        for key in empty:
+            print(f"[eval] {key}: 没有样本（多半是抽样抽空了），跳过", flush=True)
+        plan = [(key, spec) for key, spec in plan if key not in empty]
+        truth = {key: frame for key, frame in truth.items() if key not in empty}
     # 图片按数据集各建一张表：不同数据集的 index 是各自编号的，合成一张会串图。
     image_maps = {key: image_map_from_truth(frame) for key, frame in truth.items()}
     # §13 评估集冻结：抽样一次后固化，每份结果记下它评的是哪一批样本。

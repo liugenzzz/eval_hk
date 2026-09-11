@@ -1,76 +1,25 @@
 {
+  "profile": {"name": "book_zh_v1", "version": "v1"},
+
   "tsv_dir": "data/book",
+  "eval_set": "book_vqa",
   "work_dir": "work_dir_book",
   "out_dir": "eval_report_book",
   "cache_dir": "eval_cache_book",
-  "datasets": {
-    "book_vqa": {
-      "name": "book_vqa",
-      "kind": "judge_text",
-      "params": {
-        "category_field": "category",
-        "default_category": "未分类",
-        "image_root": "/path/on/eval/server/images"
-      }
-    }
-  },
-  "enabled_datasets": [
-    "book_vqa"
-  ],
+
+  "dataset_defaults": {"image_root": "/path/on/eval/server/images"},
+
   "models": [
-    {
-      "name": "base",
-      "model_path": "models/Qwen3-VL-8B-Instruct"
-    },
-    {
-      "name": "sft_ep2",
-      "model_path": "models/sft_ep2"
-    }
+    {"name": "base", "model_path": "models/Qwen3-VL-8B-Instruct"},
+    {"name": "sft_ep2", "model_path": "models/sft_ep2"}
   ],
   "baseline_model": "base",
-  "infer": {
-    "prompt_files": {
-      "book_vqa": "prompts/infer_vqa_raw.txt"
-    },
-    "max_new_tokens": 1024,
-    "image_min_pixels": 65536,
-    "image_max_pixels": 589824,
-    "batch_size": 1,
-    "gpu_ids": [],
-    "workers_per_gpu": 1,
-    "torch_dtype": "auto",
-    "device_map": "auto"
-  },
+
+  "infer": {"image_min_pixels": 65536, "image_max_pixels": 589824},
+
   "judge": {
     "api_base": "http://127.0.0.1:18180/v1/chat/completions",
     "api_key": "sk-local",
-    "model": "qwen3.6-27b",
-    "temperature": 0.0,
-    "timeout": 120,
-    "max_retries": 3,
-    "prompt_files": {
-      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
-      "pairwise": "prompts/judge_equip_pairwise.txt"
-    }
-  },
-  "report": {
-    "dims": [
-      {
-        "key": "category",
-        "from": "category",
-        "min_n": 10
-      }
-    ]
-  },
-  "category_weights": {
-    "作战应用": 1.0,
-    "拱形基础": 1.0
-  },
-  "min_category_n": 10,
-  "max_workers": 8,
-  "do_pointwise": true,
-  "do_pairwise": true,
-  "do_length_control": true,
-  "bootstrap_n": 1000,
-  "seed": 42
+    "model": "qwen3.6-27b"
+  }
 }
