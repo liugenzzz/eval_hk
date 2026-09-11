@@ -181,13 +181,20 @@ def test_a_slice_emptied_by_sampling_is_skipped_not_fatal(tmp_path, capsys):
     assert "抽样" in capsys.readouterr().out
 
 
-def test_selecting_nothing_without_sampling_is_still_an_error(tmp_path):
-    """没抽样却选空了，那就是 task_type 拼错或轮次填反 —— 静默返回空表会让报表
-    多一格「样本不足」，而那格实际上是 bug。"""
+def test_a_task_type_absent_from_the_data_is_skipped_loudly(tmp_path, capsys):
+    """一份真实的 test.jsonl 完全可能不含某一种任务（没有 inventory_locate、
+    没有 exist_negative）。
+
+    以前这里是硬报错，理由是「选空了八成是 task_type 拼错」。但 select 规则现在来自
+    内置 profile，用户手里拼不错，报错只会让整趟跑不起来。拼错的防线挪到了
+    `eval_tool check` —— 它把每个切片的样本数逐行列出来，0 条一眼看得见。
+    """
     path = tmp_path / "test.jsonl"
     _write_set(path, ["ground_appearance"] * 5)
-    with pytest.raises(ValueError, match="select 没有选中任何样本"):
-        load_eval_set(path, select=[{"task_type": ["typo_task"], "turn": 1}])
+    frame = load_eval_set(path, select=[{"task_type": ["inventory_locate"], "turn": 1}])
+    assert frame.empty
+    out = capsys.readouterr().out
+    assert "没有样本，跳过" in out and "eval_tool check" in out
 
 
 def test_sample_block_reaches_every_dataset(tmp_path):

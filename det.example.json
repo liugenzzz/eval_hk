@@ -52,6 +52,17 @@
   "derive_from": "mbjc_1602step",
   "do_pairwise": false,
   "infer": {
+    "gpu_ids": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      7
+    ],
+    "workers_per_gpu": 2,
+    "batch_size": 4,
     "image_min_pixels": 65536,
     "image_max_pixels": 589824,
     "training": {

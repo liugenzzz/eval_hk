@@ -328,6 +328,7 @@ def load_eval_set(
     rows: list[dict[str, Any]] = []
     text_only = 0
     no_turns = 0
+    produced = 0     # select 之前一共拆出多少行 —— 用来区分「文件不对」和「这一档没有」
     for record in records:
         record_rows = record_to_rows(
             record,
@@ -344,6 +345,7 @@ def load_eval_set(
             else:
                 no_turns += 1
             continue
+        produced += len(record_rows)
         for row in record_rows:
             if selection_matches(row, select):
                 rows.append(row)
@@ -352,20 +354,29 @@ def load_eval_set(
               f"（没有问题/参考答案，无法判分）", flush=True)
     if no_turns:
         print(f"[eval_set] {path}: 跳过 {no_turns} 条没有可用问答轮次的记录", flush=True)
+    if not rows and not produced:
+        # 整份文件一条问答都拆不出来（全是纯语料行、或者 conversations 写错了）。
+        # 这是文件本身有问题，跟 select 无关，必须拦 —— 放过去的话十一个切片会一起
+        # 空掉，报表全是空格。
+        raise ValueError(
+            f"{path}: 整份文件没有可用的问答轮次"
+            f"（纯语料行 {text_only} 条，没有轮次 {no_turns} 条），检查评估集格式"
+        )
     if not rows:
-        if sample_n:
-            # 抽样之后某个切片一条不剩是正常的：稀有任务（比如整份数据里只有几十条
-            # count_class）在 500 条的抽样里可能一条都没抽到。这不是配置错，
-            # 报错会让「先抽一点跑通」这件事变得没法做。返回空表，上层跳过这个数据集。
-            print(
-                f"[eval_set] {path}: 抽样 {sample_n} 条之后这个切片没有样本，跳过。"
-                f"要评它就调大 sample.n 或去掉抽样。",
-                flush=True,
-            )
-            return pd.DataFrame(columns=["index", "question", "answer", "image"])
-        # 没抽样却选空了，那就是配置写错了（任务名拼错、轮次填反）。静默返回空表会让
-        # 报表里多一格「样本不足」，而那格实际上是 bug。
-        raise ValueError(f"{path}: select 没有选中任何样本，检查 task_type 和 turn")
+        # 选空了不再当致命错误。select 规则现在来自内置 profile（十一个切片按
+        # task_type 分），用户手里拼不错；而一份真实的 test.jsonl 完全可能不含某一种
+        # 任务（没有 inventory_locate、没有 exist_negative），那时候报错等于让整趟
+        # 跑不起来。抽样把稀有任务抽空更是家常便饭。
+        #
+        # 拼错的防线挪到了 `eval_tool check`：它把每个切片的样本数逐行列出来，
+        # 0 条会标成警告，跑之前就看得见。
+        reason = f"抽样 {sample_n} 条之后" if sample_n else "按 select 规则"
+        print(
+            f"[eval_set] {path}: {reason}这个切片没有样本，跳过。"
+            f"（数据里确实没有这种任务就正常；不该是 0 的话跑 eval_tool check 对一下）",
+            flush=True,
+        )
+        return pd.DataFrame(columns=["index", "question", "answer", "image"])
     frame = pd.DataFrame(rows)
     frame["index"] = frame["index"].astype(str)
     return frame

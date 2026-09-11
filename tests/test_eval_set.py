@@ -118,11 +118,15 @@ def test_select_by_turn_alone_takes_that_turn_of_every_task(eval_set):
     assert len(frame) == 2
 
 
-def test_a_select_that_matches_nothing_raises_instead_of_returning_empty(eval_set):
-    """选空了是配置写错了（任务名拼错、轮次填反）。静默返回空表会在报表里变成一格
-    「样本不足」，而那格实际上是 bug。"""
-    with pytest.raises(ValueError, match="没有选中任何样本"):
-        load_eval_set(eval_set, select=[{"task_type": ["ground_unique"], "turn": 1}])
+def test_a_select_that_matches_nothing_returns_empty_and_says_so(eval_set, capsys):
+    """一份真实的评估集完全可能不含某一种任务。文件本身没问题，只是这一档没有 ——
+    报错会让整趟跑不起来，而 select 规则来自内置 profile，用户手里拼不错。
+
+    拼错的防线在 `eval_tool check`：它把每个切片的样本数逐行列出来，0 条看得见。
+    """
+    frame = load_eval_set(eval_set, select=[{"task_type": ["ground_unique"], "turn": 1}])
+    assert frame.empty
+    assert "没有样本，跳过" in capsys.readouterr().out
 
 
 def test_selection_matches_treats_rules_as_or():
@@ -270,9 +274,11 @@ def test_text_only_records_are_skipped_and_reported(tmp_path, capsys):
 
 
 def test_a_file_of_only_text_lines_fails_loudly(tmp_path):
+    """整份文件一条问答都拆不出来是**文件的问题**，跟 select 无关，必须拦 ——
+    放过去的话十一个切片会一起空掉，报表全是空格。"""
     path = _write_jsonl(tmp_path, [{"text": "一段正文。"}])
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="整份文件没有可用的问答轮次"):
         load_eval_set(path)
 
 

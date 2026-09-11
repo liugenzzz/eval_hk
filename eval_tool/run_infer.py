@@ -64,7 +64,7 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
         if out_path.exists() and not overwrite and not config.resume:
             written[dataset_key] = out_path
             continue
-        print(f"[infer] 读取数据集 {dataset_name} ...", flush=True)
+        print(f"[infer] 读取 {dataset_key}（{dataset_name}）...", flush=True)
         try:
             # 带上数据集参数：jsonl 真值要靠 image_root 才读得到图，靠
             # category_field 才拿得到分类。不传的话推理端读到的是另一批行。
@@ -86,11 +86,19 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
             raise
         if missing_count:
             print(
-                f"[infer] 警告：{dataset_name} 共 {len(rows)} 条中有 {missing_count} 条无图（image 列为空/NaN），"
+                f"[infer] 警告：{dataset_key} 共 {len(rows)} 条中有 {missing_count} 条无图（image 列为空/NaN），"
                 f"这些行将以纯文本方式推理。示例 index: {missing_sample}",
                 flush=True,
             )
-        print(f"[infer] {dataset_name}: 共 {len(rows)} 条，开始推理", flush=True)
+        # 报「切片名 + 抽样口径」而不只是行数。十一个数据集读的是同一份 test.jsonl，
+        # 各自 select 一个子集，再叠上抽样 —— 只打一个数字，看到的人只会觉得
+        # 「怎么少了这么多」，而这三个数缺一个都解释不了它。
+        sample_n = config.params_for(dataset_key).get("sample_n")
+        scope = f"（抽样 {sample_n} 条原始样本里选出来的）" if sample_n else ""
+        print(
+            f"[infer] {dataset_key}（{dataset_name}）: 共 {len(rows)} 条{scope}，开始推理",
+            flush=True,
+        )
         if config.resume:
             _run_dataset_resumable(
                 config,

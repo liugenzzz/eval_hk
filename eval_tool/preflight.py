@@ -73,6 +73,10 @@ def preflight(config: PipelineConfig) -> Check:
             check.ok(f"{key}", "（派生集，跑的时候自己造）")
 
     check.lines.append("")
+    check.lines.append("[各切片的样本数]")
+    _slice_sizes(check, config, mainline)
+
+    check.lines.append("")
     check.lines.append("[数据路径]")
     seen: dict[str, Any] = {}
     for key in config.enabled_datasets:
@@ -147,6 +151,26 @@ def preflight(config: PipelineConfig) -> Check:
         )
 
     check.lines.append("")
+    check.lines.append("[推理]")
+    if config.infer.gpu_ids:
+        workers = len(config.infer.gpu_ids) * config.infer.workers_per_gpu
+        check.ok(
+            "数据并行",
+            f"GPU {config.infer.gpu_ids} × 每卡 {config.infer.workers_per_gpu} worker "
+            f"= {workers} 个进程，各加载一份模型，batch_size={config.infer.batch_size}",
+        )
+        if config.infer.device_map and config.infer.device_map != "auto":
+            check.warn("device_map", "配了 gpu_ids 时这个字段用不上（每个 worker 独占一张卡）")
+        check.warn(
+            "gpu_ids",
+            "写的是**物理**卡号，每个 worker 会自己设 CUDA_VISIBLE_DEVICES。"
+            "命令行上就别再设 CUDA_VISIBLE_DEVICES 了，两边会打架",
+        )
+    else:
+        check.ok("单进程推理", f"device_map={config.infer.device_map}，batch_size={config.infer.batch_size}"
+                              "（模型单卡放得下的话，配 gpu_ids 做数据并行快得多）")
+
+    check.lines.append("")
     check.lines.append("[打分器]")
     try:
         plan = _scoring_plan(config.to_eval_config())
@@ -167,6 +191,35 @@ def preflight(config: PipelineConfig) -> Check:
     check.ok("输出目录", config.out_dir)
     check.ok("缓存目录", f"{config.cache_dir}  ← 别删，重跑和加模型全靠它")
     return check
+
+
+def _slice_sizes(check: Check, config: PipelineConfig, mainline: list[str]) -> None:
+    """每个切片实际有多少条。
+
+    十一个数据集读的是同一份 test.jsonl，各自 select 一个子集，再叠上抽样。跑起来
+    只看到「共 593 条」的时候没人算得出这 593 是怎么来的 —— 在这里一次全列出来，
+    跑之前就知道每一档有多少样本、够不够下结论（n < 30 报表上不给百分比）。
+    """
+    from .io import load_truth_dataset
+
+    for key in mainline:
+        try:
+            # 不读图：这里只数行数，为了几个数字把整批图编成 base64 没有道理
+            rows = len(load_truth_dataset(
+                config.tsv_dir, config.datasets[key], config.dataset_params.get(key) or {},
+                need_images=False,
+            ))
+        except Exception as exc:  # noqa: BLE001 - 体检不该因为一个切片读不了就中断
+            check.bad(key, f"{type(exc).__name__}: {exc}")
+            continue
+        if not rows:
+            # 数据里确实没有这种任务时它就是 0，不该拦住整趟；但也不能不说 ——
+            # 这一格在报表上会整个缺席。
+            check.warn(key, "0 条  ← 这个数据集不会被评估（数据里没有这种任务？）")
+        elif rows < 30:
+            check.warn(key, f"{rows} 条  ← n < 30，报表上这一档不给百分比")
+        else:
+            check.ok(key, f"{rows} 条")
 
 
 def render(check: Check) -> str:

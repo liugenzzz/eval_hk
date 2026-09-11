@@ -56,9 +56,9 @@ def _tree(tmp_path, *, with_pools=True, with_images=True):
 
 def test_a_good_config_passes_clean(tmp_path):
     result = preflight(load_pipeline_config(_tree(tmp_path)))
+    # 这个 fixture 只有一种任务、一条样本，所以另外十个切片是 0 条、这一个 n<30，
+    # 都是提醒不是错误 —— 真实数据里它们各自有量。
     assert result.errors == 0, render(result)
-    # labels_dir 没配是一处提醒（CHAIR 出不了数），不是错误
-    assert result.warnings == 1
 
 
 def test_a_missing_image_root_is_an_error_not_a_warning(tmp_path):
@@ -180,3 +180,37 @@ def test_many_models_warn_that_chain_decay_only_holds_for_one(tmp_path):
 def test_two_models_do_not_trigger_the_pairwise_warning(tmp_path):
     result = preflight(load_pipeline_config(_tree(tmp_path)))
     assert not any("do_pairwise" in line for line in result.lines)
+
+
+def test_slice_sizes_are_listed_before_running(tmp_path):
+    """十一个切片读的是同一份 test.jsonl，各自 select 一个子集再叠上抽样。
+
+    跑起来只看到「共 593 条」的时候没人算得出这 593 是怎么来的 —— 体检时一次全列出来。
+    """
+    config = _tree(tmp_path)
+    result = preflight(load_pipeline_config(config))
+    header = result.lines.index("[各切片的样本数]")
+    assert any("ground_box" in line for line in result.lines[header:header + 12])
+
+
+def test_a_slice_below_thirty_is_flagged(tmp_path):
+    """n < 30 时报表上那一档不给百分比（status=insufficient）。跑之前就该知道。"""
+    result = preflight(load_pipeline_config(_tree(tmp_path)))
+    line = next(line for line in result.lines if "ground_box" in line and "条" in line)
+    assert "n < 30" in line
+
+
+def test_data_parallel_settings_are_spelled_out(tmp_path):
+    config = _tree(tmp_path)
+    raw = json.loads(config.read_text(encoding="utf-8"))
+    raw["infer"] = {"gpu_ids": [0, 1, 2], "workers_per_gpu": 2, "batch_size": 4}
+    config.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    result = preflight(load_pipeline_config(config))
+    assert any("6 个进程" in line for line in result.lines)
+    # gpu_ids 是物理卡号，外面再设 CUDA_VISIBLE_DEVICES 会打架
+    assert any("CUDA_VISIBLE_DEVICES" in line for line in result.lines)
+
+
+def test_single_process_inference_suggests_data_parallel(tmp_path):
+    result = preflight(load_pipeline_config(_tree(tmp_path)))
+    assert any("单进程推理" in line for line in result.lines)
