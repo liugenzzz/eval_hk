@@ -14,6 +14,7 @@
     {"name": "book_2000", "model_path": "/code/eval_hk/eval_model/full_train_8b/checkpoint-2000"}
   ],
   "baseline_model": "base",
+  "do_pairwise": false,
 
   "infer": {
     "image_min_pixels": 65536,
