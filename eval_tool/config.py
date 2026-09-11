@@ -633,7 +633,10 @@ def parse_datasets(
 
 
 def is_pipeline_config(path: str | Path) -> bool:
-    raw = _load_raw_config(Path(path))
+    # 先套 profile 再判断：profile 里带着 infer（推理提示词、max_new_tokens），
+    # 配置本身可以一个 infer 字段都不写。不套的话这种配置会被当成老版 eval 配置，
+    # 走另一条通路 —— 那条路不会推理，也不认 derive。
+    raw = apply_profile(_load_raw_config(Path(path)))
     infer_raw = raw.get("infer")
     models_raw = raw.get("models")
     return (

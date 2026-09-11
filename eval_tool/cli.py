@@ -39,7 +39,7 @@ from .run_eval import run as run_eval_stage
 from .run_infer import run as run_infer_stage
 
 
-SUBCOMMANDS = {"convert", "infer", "eval", "sweep", "all", "build-dpo", "derive"}
+SUBCOMMANDS = {"check", "convert", "infer", "eval", "sweep", "all", "build-dpo", "derive"}
 
 
 def _model_names(value: str) -> list[str]:
@@ -61,6 +61,11 @@ def _rubric_names(value: str) -> list[str]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m eval_tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    check = subparsers.add_parser(
+        "check", help="开跑前体检：路径、模型、评估集、裁判一次全查（不跑推理）"
+    )
+    check.add_argument("--config", required=True)
 
     convert = subparsers.add_parser("convert", help="Convert ShareGPT JSON to TSV")
     convert.add_argument("input_json")
@@ -331,7 +336,17 @@ def _handle_derive(args: argparse.Namespace) -> Path:
     return path
 
 
+def _handle_check(args: argparse.Namespace) -> int:
+    """跑之前先体检。整套跑完几个小时，而最常见的失败是一条路径写错。"""
+    from .preflight import preflight, render
+
+    result = preflight(_require_pipeline(args.config))
+    print(render(result))
+    return result.errors
+
+
 HANDLERS: dict[str, Callable[[argparse.Namespace], Any]] = {
+    "check": _handle_check,
     "convert": _handle_convert,
     "infer": _handle_infer,
     "eval": _handle_eval,
