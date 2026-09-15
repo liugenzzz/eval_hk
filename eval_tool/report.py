@@ -28,6 +28,8 @@ from .breakdown import (
     parse_dims,
 )
 from .length_control import pairwise_length_control, pointwise_length_control
+from .industrial_rubric import INDUSTRIAL_COLUMNS
+from .industrial_report import summarize_industrial, summarize_industrial_status
 
 # 达标率之外还值得按维度拆的连续量。四点偏差和 IoU 是连续值，只报一个达标率会丢掉
 # 「差多少」的信息 —— 达标率一样的两个模型，偏差均值可以差一倍。
@@ -155,6 +157,8 @@ def write_reports(
             )
             if col in all_details.columns
         ]
+        combined_cols.extend(col for col in INDUSTRIAL_COLUMNS
+                             if col in all_details.columns and col not in combined_cols)
         _detail_without_image(all_details[combined_cols]).to_excel(combined_path, index=False)
         written["judge_detail_all.xlsx"] = combined_path
 
@@ -209,6 +213,20 @@ def _write_breakdowns(
     """
     written: dict[str, Path] = {}
     dims = report_dims if report_dims is not None else default_dims()
+    industrial_keys = tuple(key for key, kind in (dataset_kinds or {}).items()
+                            if kind == "industrial_describe")
+    if industrial_keys and all_details["dataset"].isin(industrial_keys).any():
+        object_min_n = next((dim.min_n for dim in dims if dim.key == "object_category"), 30)
+        industrial_scores = summarize_industrial(
+            all_details, datasets=industrial_keys, min_n=object_min_n,
+            bootstrap_n=bootstrap_n, seed=seed,
+        )
+        industrial_status = summarize_industrial_status(all_details, datasets=industrial_keys)
+        for filename, table in (("industrial_quality_scores.csv", industrial_scores),
+                                ("industrial_judge_status.csv", industrial_status)):
+            path = out / filename
+            table.to_csv(path, index=False, encoding="utf-8-sig")
+            written[filename] = path
     breakdown = make_breakdown(
         all_details,
         dims,

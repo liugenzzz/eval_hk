@@ -18,6 +18,7 @@ from .io import align_truth_and_prediction, image_map_from_truth, load_predictio
 from .judge import JudgeClient
 from .report import write_reports
 from .score_vqa import score_pairwise_vs_baseline
+from .rubrics import validate_industrial_rubric
 
 
 def _scoring_plan(config: EvalConfig) -> list[tuple[str, scorers.ScorerSpec]]:
@@ -36,6 +37,7 @@ def _scoring_plan(config: EvalConfig) -> list[tuple[str, scorers.ScorerSpec]]:
 
 
 def run(config: EvalConfig) -> dict[str, Path]:
+    validate_industrial_rubric(config)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     plan = _scoring_plan(config)
@@ -126,6 +128,10 @@ def run(config: EvalConfig) -> dict[str, Path]:
                 # pipeline -- plain pd.read_excel would infer numeric-looking indices as int64
                 # and blow up the pairwise merge ("merge on object and int64 columns").
                 scored = normalize_index(read_table(scored_path))
+                if spec.kind == "industrial_describe":
+                    from .scorers.industrial import validate_scored_industrial
+
+                    validate_scored_industrial(scored)
                 scored["model"] = model.name
                 scored["dataset"] = dataset_key
                 scored = _with_compliance(scored, spec, config, dataset_key)

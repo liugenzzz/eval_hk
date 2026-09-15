@@ -22,6 +22,8 @@ import json
 import re
 from typing import Any
 
+from .industrial_rubric import parse_industrial_v1
+
 PASS_THRESHOLD = 60.0
 
 # ---- V2: coarse 1-5 Likert, three axes -------------------------------------------
@@ -314,7 +316,7 @@ def parse_legacy_5(obj: dict[str, Any]) -> dict[str, object]:
 # ==================================================================================
 
 PARSERS = {"v1": parse_v1, "v2": parse_v2, "v3": parse_v3, "v3b": parse_v3b,
-           "v4": parse_v4, "v4b": parse_v4b}
+           "v4": parse_v4, "v4b": parse_v4b, "industrial_v1": parse_industrial_v1}
 
 
 def parse_pointwise(content: str) -> dict[str, object]:

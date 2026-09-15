@@ -13,6 +13,7 @@ from .imaging import decode_image_cell
 # with key-presence inference as the fallback for untagged output.
 from .judge_rubrics import PASS_THRESHOLD, extract_json_object, parse_pointwise
 from .prompts import PAIRWISE_JUDGE_PROMPT, VQA_JUDGE_PROMPT
+from .industrial_rubric import INDUSTRIAL_PROMPT_MARKER
 
 _extract_json_object = extract_json_object
 parse_pointwise_judge = parse_pointwise
@@ -153,6 +154,10 @@ class JudgeClient:
         )
         content = self._post(self.settings.pointwise_prompt, user_text, image_b64=image_b64)
         try:
+            industrial_prompt = INDUSTRIAL_PROMPT_MARKER in self.settings.pointwise_prompt
+            industrial_reply = _extract_json_object(content).get("rubric") == "industrial_v1"
+            if industrial_prompt != industrial_reply:
+                raise ValueError("industrial judge prompt and reply must both use rubric=industrial_v1")
             return parse_pointwise_judge(content)
         except Exception as exc:
             # Surface the raw judge response in the error so it lands directly in the

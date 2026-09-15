@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .config import EvalConfig
 from .prompting import load_prompt_text
+from .industrial_rubric import INDUSTRIAL_PROMPT_MARKER
 
 
 class RubricError(ValueError):
@@ -17,6 +18,22 @@ RUBRIC_PROMPTS = {
     version: _PROMPT_ROOT / f"judge_equip_pointwise_{version}.txt"
     for version in RUBRIC_VERSIONS
 }
+RUBRIC_VERSIONS = RUBRIC_VERSIONS + ("industrial_v1",)
+RUBRIC_PROMPTS["industrial_v1"] = _PROMPT_ROOT / "judge_industrial_pointwise_v1.txt"
+
+
+def validate_industrial_rubric(config: EvalConfig, prompt: str | None = None) -> None:
+    """Reject domain mismatches before reading images or invoking a judge."""
+    industrial = [key for key in config.enabled_datasets
+                  if key in config.datasets and config.kind_for(key) == "industrial_describe"]
+    selected_prompt = config.judge.pointwise_prompt if prompt is None else prompt
+    is_industrial = INDUSTRIAL_PROMPT_MARKER in selected_prompt
+    if industrial and not is_industrial:
+        raise RubricError("industrial_describe requires rubric industrial_v1; equipment rubrics are incompatible")
+    if is_industrial:
+        if not industrial or any(config.kind_for(key) != "industrial_describe"
+                                 for key in config.enabled_datasets if key in config.datasets):
+            raise RubricError("industrial_v1 requires a separate industrial_describe evaluation config")
 
 
 def rubric_prompt_path(version: str) -> Path:
@@ -47,6 +64,7 @@ def apply_rubric(
     no_pairwise: bool = False,
 ) -> EvalConfig:
     prompt = load_prompt_text(rubric_prompt_path(version))
+    validate_industrial_rubric(config, prompt)
     judge = replace(config.judge, pointwise_prompt=prompt)
     root = config.out_dir.parent if out_root is None else Path(out_root)
     out_dir = root / f"{config.out_dir.name}_{version}"

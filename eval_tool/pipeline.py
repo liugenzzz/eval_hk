@@ -22,7 +22,7 @@ from .io import truth_path
 from .phrase_pool import PhrasePool
 from .run_eval import run as run_eval
 from .run_infer import run as run_infer
-from .rubrics import apply_rubric, validate_rubric_list
+from .rubrics import apply_rubric, validate_industrial_rubric, validate_rubric_list
 
 
 class PipelineError(RuntimeError):
@@ -110,13 +110,13 @@ def run_sweep(
         )
     reports: dict[str, dict[str, Path]] = {}
     frames: dict[str, pd.DataFrame] = {}
-    for version in versions:
-        eval_config = apply_rubric(
+    evaluation_configs = [apply_rubric(
             config.to_eval_config(model_names),
             version,
             out_root=out_root,
             no_pairwise=no_pairwise,
-        )
+        ) for version in versions]
+    for version, eval_config in zip(versions, evaluation_configs):
         reports[version] = run_eval(eval_config)
         detail = reports[version].get("judge_detail_all.xlsx")
         if detail is None or not Path(detail).is_file():
@@ -265,6 +265,12 @@ def run_all(
     clean_partial: bool = False,
     rubric: str | None = None,
 ) -> dict[str, Any]:
+    # Validate the requested domain before any costly inference work.
+    eval_config = config.to_eval_config(model_names)
+    if rubric is None:
+        validate_industrial_rubric(eval_config)
+    else:
+        apply_rubric(eval_config, rubric)
     derived_keys = {plan.dataset for plan in config.derive_plans}
     mainline = [key for key in config.enabled_datasets if key not in derived_keys]
     derived = [key for key in config.enabled_datasets if key in derived_keys]

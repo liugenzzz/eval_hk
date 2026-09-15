@@ -11,6 +11,7 @@ import pandas as pd
 from .cache import JsonlCache
 from .history import format_history_for_judge, parse_history_cell
 from .judge import JudgeClient
+from .industrial_rubric import INDUSTRIAL_COLUMNS
 from .metrics_text import aux_metrics, tokenize_for_overlap
 
 
@@ -88,6 +89,7 @@ def _judge_pointwise_with_retry(
             result = client.judge_pointwise(question, row.get("answer", ""), row.get("prediction", ""), image_b64)
             out = {"hit": result["hit"], "judge_reason": result["reason"]}
             out.update({col: result.get(col) for col in SCORE_COLUMNS})
+            out.update({col: result[col] for col in INDUSTRIAL_COLUMNS if col in result})
             return out
         except Exception as exc:
             last_err = f"{type(exc).__name__}: {exc}"
@@ -154,7 +156,11 @@ def score_pointwise_vqa(
 
     hits: list[float | None] = []
     reasons: list[str] = []
-    columns: dict[str, list[Any]] = {col: [] for col in SCORE_COLUMNS}
+    # Keep legacy output schemas unchanged; new rubric fields appear only when returned.
+    score_columns = SCORE_COLUMNS + tuple(
+        col for col in INDUSTRIAL_COLUMNS if any(col in result for result in results.values())
+    )
+    columns: dict[str, list[Any]] = {col: [] for col in score_columns}
     aux = []
     for i, row in enumerate(rows):
         idx = str(row.get("index", i))
@@ -165,7 +171,7 @@ def score_pointwise_vqa(
         raw_hit = result.get("hit")
         hits.append(None if raw_hit is None else float(raw_hit))
         reasons.append(str(result.get("judge_reason", "")))
-        for col in SCORE_COLUMNS:
+        for col in score_columns:
             columns[col].append(result.get(col))
         aux.append(aux_metrics(row.get("answer", ""), row.get("prediction", "")))
     scored["hit"] = hits
