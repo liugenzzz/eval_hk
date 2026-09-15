@@ -1,0 +1,41 @@
+{
+  "datasets": {
+    "industrial_zh": {
+      "name": "industrial_eval",
+      "kind": "industrial_describe",
+      "params": {
+        "category_field": "object_category",
+        "default_category": "unknown",
+        "select": [{"language": "zh"}]
+      }
+    },
+    "industrial_en": {
+      "name": "industrial_eval",
+      "kind": "industrial_describe",
+      "params": {
+        "category_field": "object_category",
+        "default_category": "unknown",
+        "select": [{"language": "en"}]
+      }
+    }
+  },
+  "enabled_datasets": ["industrial_zh", "industrial_en"],
+  "do_pointwise": true,
+  "do_pairwise": false,
+  "do_length_control": false,
+  "infer": {
+    "prompt_file": "prompts/infer_vqa_raw.txt",
+    "max_new_tokens": 1024
+  },
+  "judge": {
+    "prompt_files": {"pointwise": "prompts/judge_industrial_pointwise_v1.txt"}
+  },
+  "report": {
+    "dims": [
+      {"key": "object_category", "from": "meta.object_category", "min_n": 30},
+      {"key": "source_domain", "from": "meta.source_domain", "min_n": 30},
+      {"key": "defect_type", "from": "meta.defect_type", "min_n": 30}
+    ]
+  },
+  "min_category_n": 30
+}

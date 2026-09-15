@@ -1,0 +1,9 @@
+{
+  "objects": [
+    {"source_domain": "0-4aircraft4000", "alias": "飞机", "canonical": "aircraft"}
+  ],
+  "defects": [
+    {"source_domain": "0-4aircraft4000", "object_category": "aircraft", "alias": "裂纹", "canonical": "crack"},
+    {"source_domain": "0-4aircraft4000", "object_category": "aircraft", "alias": "裂痕", "canonical": "crack"}
+  ]
+}

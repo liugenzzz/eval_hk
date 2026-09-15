@@ -170,10 +170,15 @@ def normalize_conversations(record: Mapping[str, Any]) -> list[dict[str, str]]:
 
 
 def selection_matches(row: Mapping[str, Any], select: Sequence[Mapping[str, Any]] | None) -> bool:
-    """``select`` 是若干条 {task_type: [...], turn: n} 的或关系；留空表示全要。"""
+    """OR of task/turn rules, optionally restricted to metadata.language."""
     if not select:
         return True
     for rule in select:
+        languages = rule.get("language")
+        if languages is not None:
+            wanted_languages = [languages] if isinstance(languages, str) else list(languages)
+            if str(row.get("meta.language", "")) not in {str(value) for value in wanted_languages}:
+                continue
         tasks = rule.get("task_type")
         if tasks is not None:
             wanted = [tasks] if isinstance(tasks, str) else list(tasks)

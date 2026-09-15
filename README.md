@@ -15,7 +15,9 @@
 | **工业质检** | 工业物体与缺陷描述，中英文分开、按物体类型出分 | `industrial_zh` / `industrial_en` | 独立 industrial_v1 pointwise：物体、缺陷、外观、位置；不运行 pairwise | [工业质检评估](docs/guides/工业质检评估_使用说明.md) |
 | **目标检测** | 指代定位、多框检测、物体识别、计数、清单、拒答、区域描述 | `eval_set_v1`（构建端产出的 `test.jsonl`） | 九个纯代码打分器 + 一个裁判打分器 | **[目标检测评估](docs/目标检测评估.md)** |
 
-四个领域使用同一套评分框架。工业质检复用推理与 pointwise 基础设施，使用独立 kind、提示词和评分口径，并提供配对抽样及维度汇总工具。目标检测多了一批打分器和报表维度。工业质检的物体类别用于分组，物体、缺陷、外观、位置用于逐条评分，不能将裁判维度分直接当作分类准确率。
+四个领域使用同一套评分框架。工业质检复用推理与 pointwise 基础设施，使用独立 kind、提示词和评分口径，并提供训练 JSONL 抽取及维度汇总工具。目标检测多了一批打分器和报表维度。工业质检的物体类别用于分组，物体、缺陷、外观、位置用于逐条评分，不能将裁判维度分直接当作分类准确率。
+
+工业质检当前流程：`industrial_extract` 从 `merged_zh.jsonl` / `merged_en.jsonl` 各抽 500 条，输出一个 `industrial_eval.jsonl`；用 `industrial_mixed.example.json` 配置推理、评分。两个语言切片分别选行，不会重复处理整份文件。每种语言内部同图最多一问，两种语言可以共享图片；训练数据抽取成绩属于回归评估。完整命令、标签映射与可选严格配对流程见[工业质检指南](docs/guides/工业质检评估_使用说明.md)。
 
 ---
 
@@ -361,7 +363,7 @@ prompts/
 |---|---|---|
 | 装备 | `aero_mcq.tsv` / `aero_judge.tsv` / `aero_vqa.tsv` | TSV，列见下 |
 | 书籍 | 自己命名，如 `book_mcq.tsv` | 同上 |
-| 工业质检 | `industrial_zh.jsonl` / `industrial_en.jsonl` | 中英文配对的单轮图片问答，metadata 保留物体/缺陷分类 |
+| 工业质检 | `industrial_eval.jsonl` | 合并中英文单轮图片问答，按 `metadata.language` 分别推理/评分，保留物体/缺陷分类；另支持两个独立配对文件 |
 | 目标检测 | `eval_set_v1.jsonl` | 构建端产出的 `test.jsonl`，直接读，按轮次拆行 |
 
 TSV 需要的列：`index`、`question`、`answer`，选择题另需 `A`/`B`/`C`/`D`，可选 `image`（base64）、`history`、`category`、`l2-category`、`source_id`。
