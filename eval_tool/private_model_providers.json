@@ -1,0 +1,42 @@
+{
+  "vlm_pool": {
+    "strategy": "least_busy_weighted_fallback",
+    "fallback": {
+      "enabled": true,
+      "max_attempts": 2,
+      "cooldown_seconds": 300
+    },
+    "providers": [
+      {
+        "name": "qwen3.6-27b",
+        "url": "http://192.168.48.7:18180/v1/chat/completions",
+        "model": "qwen3.6-27b",
+        "api_key_env": "QWEN_36_27B_API_KEY",
+        "stream": false,
+        "temperature": 0.4,
+        "max_tokens": 8192,
+        "timeout": 240,
+        "chat_template_kwargs": {"enable_thinking": false},
+        "capabilities": ["text", "image"],
+        "task_types": ["industrial_review"],
+        "weight": 1,
+        "max_concurrency": 4
+      },
+      {
+        "name": "qwen3.6-27b_v2",
+        "url": "http://192.168.48.7:18181/v1/chat/completions",
+        "model": "qwen3.6-27b",
+        "api_key_env": "QWEN_36_27B_API_KEY",
+        "stream": false,
+        "temperature": 0.6,
+        "max_tokens": 8192,
+        "timeout": 240,
+        "chat_template_kwargs": {"enable_thinking": false},
+        "capabilities": ["text", "image"],
+        "task_types": ["industrial_review"],
+        "weight": 2,
+        "max_concurrency": 4
+      }
+    ]
+  }
+}

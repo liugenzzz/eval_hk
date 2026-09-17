@@ -1,0 +1,24 @@
+{
+  "profile": {"name": "industrial_mixed_v1", "version": "v1"},
+  "tsv_dir": "data/industrial_eval_1000_v2",
+  "work_dir": "eval_output/industrial_real_1000/work_dir",
+  "out_dir": "eval_output/industrial_real_1000/eval_report",
+  "cache_dir": "eval_output/industrial_real_1000/eval_cache",
+  "dataset_defaults": {"verify_frozen_manifest": true},
+  "models": [
+    {"name": "base", "model_path": "/code/model_base/Qwen3-VL-8B-Instruct"},
+    {"name": "industrial_sft", "model_path": "/code/eval_hk/eval_model/industrial/checkpoint-final"}
+  ],
+  "baseline_model": "base",
+  "infer": {
+    "image_min_pixels": 65536,
+    "image_max_pixels": 589824,
+    "gpu_ids": [0],
+    "workers_per_gpu": 1,
+    "batch_size": 1
+  },
+  "judge": {
+    "api_base": "http://127.0.0.1:18180/v1/chat/completions",
+    "model": "qwen3.6-27b"
+  }
+}

@@ -158,6 +158,8 @@ def test_sha256_is_stable_for_the_same_bytes(eval_set, tmp_path):
 
 
 def test_truth_loading_prefers_jsonl_over_tsv(tmp_path, eval_set):
+    (tmp_path / "a.jpg").write_bytes(b"image-a")
+    (tmp_path / "b.jpg").write_bytes(b"image-b")
     eval_set.rename(tmp_path / "eval_set_v1.jsonl")
     pd.DataFrame([{"index": "x", "question": "q", "answer": "a"}]).to_csv(
         tmp_path / "eval_set_v1.tsv", sep="\t", index=False
@@ -166,6 +168,7 @@ def test_truth_loading_prefers_jsonl_over_tsv(tmp_path, eval_set):
     frame = load_truth_dataset(tmp_path, "eval_set_v1", {"select": [{"turn": 1}]})
     assert len(frame) == 2
     assert "meta.difficulty" in frame.columns
+    assert frame["image"].astype(str).str.len().min() > 0
 
 
 def test_json_array_input_is_accepted_too(tmp_path):

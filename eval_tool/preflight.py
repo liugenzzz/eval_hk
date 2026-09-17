@@ -84,8 +84,13 @@ def preflight(config: PipelineConfig) -> Check:
             value = (config.dataset_params.get(key) or {}).get(field)
             if value:
                 seen.setdefault(field, value)
-    check.path("image_root", seen.get("image_root"), directory=True)
-    check.path("classes_yaml", seen.get("classes_yaml"))
+    if seen.get("image_root"):
+        check.path("image_root", seen["image_root"], directory=True)
+    else:
+        check.ok("image_root", "省略：使用 JSONL images；相对路径按 JSONL 所在目录解析")
+    needs_class_table = any(config.dataset_kinds.get(key) in
+                            {"object_ident", "inventory", "describe"} for key in mainline)
+    check.path("classes_yaml", seen.get("classes_yaml"), required=needs_class_table)
     check.path("labels_dir", seen.get("labels_dir"), required=False, directory=True)
     check.path("describe_prompt_dir", seen.get("describe_prompt_dir"), required=False, directory=True)
 

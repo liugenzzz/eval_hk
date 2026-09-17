@@ -3,3 +3,8 @@
 __pycache__/
 *.py[cod]
 *.zip
+data/industrial_eval_1000_v2/
+eval_hk-server-*.tar.gz
+.test_mapping_20260916_*/
+.test_tmp/
+.tmp_private_review_tests_*/

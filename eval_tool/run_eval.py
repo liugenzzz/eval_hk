@@ -38,6 +38,11 @@ def _scoring_plan(config: EvalConfig) -> list[tuple[str, scorers.ScorerSpec]]:
 
 def run(config: EvalConfig) -> dict[str, Path]:
     validate_industrial_rubric(config)
+    from .industrial_frozen_check import verify_config_datasets
+
+    verify_config_datasets(config.tsv_dir,
+                           {key: config.datasets[key] for key in config.enabled_datasets if key in config.datasets},
+                           config.dataset_params)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     config.cache_dir.mkdir(parents=True, exist_ok=True)
     plan = _scoring_plan(config)

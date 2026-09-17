@@ -37,6 +37,9 @@ class InferenceWorkerError(RuntimeError):
 
 
 def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, Path]:
+    from .industrial_frozen_check import verify_config_datasets
+
+    verify_config_datasets(config.tsv_dir, config.datasets, config.dataset_params)
     config.out_dir.mkdir(parents=True, exist_ok=True)
     use_parallel = generator is None and bool(config.gpu_ids)
     overwrite = _overwrite_enabled(config)

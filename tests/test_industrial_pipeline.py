@@ -60,7 +60,7 @@ def test_bilingual_pointwise_runs_without_pairwise_and_preserves_categories(tmp_
     config = replace(config, tsv_dir=tmp_path, out_dir=tmp_path / "report",
                      cache_dir=tmp_path / "cache", bootstrap_n=20, min_category_n=1,
                      models=[ModelConfig(name=name, paths=predictions) for name in ("base", "sft")],
-                     dataset_params={key: {**params, "image_root": str(tmp_path)}
+                     dataset_params={key: dict(params)
                                      for key, params in config.dataset_params.items()},
                      report_dims=[{**dim, "min_n": 1} for dim in config.report_dims])
     written = run(config)

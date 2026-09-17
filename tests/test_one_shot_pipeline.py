@@ -178,6 +178,8 @@ def _one_shot_config(tmp_path, *, with_derive=True):
     tsv = tmp_path / "tsv"; tsv.mkdir()
     with (tsv / "eval_set_v1.jsonl").open("w", encoding="utf-8") as handle:
         for i in range(6):
+            # Inference now loads JSONL images without an image_root switch.
+            (tsv / f"img{i}.jpg").write_bytes(b"fixture-image")
             handle.write(json.dumps(_record(i), ensure_ascii=False) + "\n")
     prompt = tmp_path / "raw.txt"; prompt.write_text("{question}", encoding="utf-8")
     pool = tmp_path / "pool.txt"

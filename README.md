@@ -76,6 +76,8 @@ def score_my_kind(data, ctx):
 
 ## 统一入口
 
+工业质检的完整数据构建流程使用 `python industrial_build.py --help`：全量扫描、私有模型审核、冻结标签、样本质量检查、配额规划和覆盖验收。完成后用 `industrial_quality.example.json` 接常规 `infer` / `eval`。见 [完整构建说明](docs/guides/工业质检评估集_审核冻结与覆盖验收.md)。
+
 复制 `pipeline.example.json` 为 `pipeline.json`（目标检测用 `det.example.json`），在一份配置里填数据、多个模型、推理和裁判参数：
 
 ```bash

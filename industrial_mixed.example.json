@@ -4,7 +4,6 @@
   "work_dir": "eval_output/industrial_mixed/industrial_v1/work_dir",
   "out_dir": "eval_output/industrial_mixed/industrial_v1/eval_report",
   "cache_dir": "eval_output/industrial_mixed/industrial_v1/eval_cache",
-  "dataset_defaults": {"image_root": "/"},
   "models": [
     {"name": "base", "model_path": "/code/model_base/Qwen3-VL-8B-Instruct"},
     {"name": "industrial_sft", "model_path": "/code/eval_hk/eval_model/industrial/checkpoint-final"}

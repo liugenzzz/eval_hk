@@ -76,8 +76,8 @@ def load_truth_dataset(
     - **评估端只有裁判组要图**。代码打分器（画框、计数、识别）压根不看图，为了跑一次
       坐标打分把几个 G 的图读进内存没有道理。
 
-    两边共用同一份 ``params``，所以图片开关不能只靠配不配 ``image_root`` —— 配置里
-    照常写路径，用途上的差别在这里区分。
+    ``image_root`` 可省略：绝对 images 路径直接使用，相对路径以 JSONL 所在目录为基准。
+    显式 image_root 仅替换相对路径的基准；是否加载图片由 need_images 决定。
     """
     path = truth_path(tsv_dir, dataset_name)
     if path.suffix.lower() == ".jsonl":
@@ -92,7 +92,7 @@ def load_truth_dataset(
             load_eval_set(
                 path,
                 select=params.get("select"),
-                image_root=params.get("image_root") if need_images else None,
+                image_root=(params.get("image_root") or path.parent) if need_images else None,
                 category_field=params.get("category_field"),
                 # 抽样在**记录**层做，所以同一份评估集的几个切片看到的是同一批样本。
                 sample_n=int(sample_n) if sample_n else None,
