@@ -12,10 +12,11 @@ Layout (--out)
   <corpus_type>/pt/<corpus_type>.pt.jsonl    {"id", "text"}: all pretraining text of that corpus type in one
                                              file (data_format pt, plus the question-less pipeline_export
                                              rows of aircraft_book_v1)
-  <corpus_type>/qa/<batch>.<format>.jsonl    text-only QA                 format: sharegpt | openai | alpaca
-  <corpus_type>/vqa/<batch>.<format>.jsonl   QA with images or videos
+  <corpus_type>/qa/<source>.<format>.jsonl   text-only QA                 format: sharegpt | openai | alpaca
+  <corpus_type>/vqa/<source>.<format>.jsonl  QA with images or videos
+  (<source> is the batch_tag, or its readable name from SOURCE_NAMES, e.g. aircraft_vqa_v1 -> aircraft_defect)
   (a .image / .video / .mixed suffix appears only if one batch+format holds both images and videos)
-  dataset_info.json                          LlamaFactory registration: field_<type>_pt, field_<type>_<qa|vqa>_<batch>_<format>
+  dataset_info.json                          only with --dataset-info: LlamaFactory registration of every file
   manifest.json                              per file: rows, bytes, format, modality, batches; per batch: rows in the
                                              DB, written per file, skipped per reason
   _rejects/<batch>.jsonl                     {"id", "data_format", "task_type", "reason"} of every row not written
@@ -49,6 +50,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fielddb import connect  # noqa: E402
 
 CHUNK = 20000
+# File names use these readable source names; ids and the manifest keep the DB batch_tag, so every row
+# still maps back to the DB.
+SOURCE_NAMES = {
+    "video_v1": "video_bilibili",                         # B站视频
+    "video_abnormal_behavior_v1": "video_park_abnormal",  # 园区异常行为
+    "aircraft_vqa_v1": "aircraft_defect",                 # 飞机缺陷问答
+}
 SHAREGPT_TAGS = {"role_tag": "from", "content_tag": "value", "user_tag": "human",
                  "assistant_tag": "gpt", "system_tag": "system"}
 OPENAI_TAGS = {"role_tag": "role", "content_tag": "content", "user_tag": "user",
@@ -262,7 +270,7 @@ def run_unit(unit):
         else:
             modality = "mixed" if images and videos else "image" if images else "video" if videos else "text"
             kind = "qa" if modality == "text" else "vqa"
-            name = f"{ctype}/{kind}/{batch}.{out_fmt}.{modality}.jsonl"   # suffix dropped at merge if unique
+            name = f"{ctype}/{kind}/{SOURCE_NAMES.get(batch, batch)}.{out_fmt}.{modality}.jsonl"  # suffix dropped at merge if unique
             line = {"id": key, **rec}
             if images:
                 line["images"] = images
@@ -405,7 +413,8 @@ def main():
     ap.add_argument("--exclude", default="", help="comma-separated regexes on batch_tag")
     ap.add_argument("--exclude-media", default="", help="file of media paths whose rows are left out")
     ap.add_argument("--bench", action="store_true")
-    ap.add_argument("--only", default="", help="comma-separated batch_tags (testing)")
+    ap.add_argument("--only", default="", help="comma-separated batch_tags (testing, or re-export for splice_export.py)")
+    ap.add_argument("--dataset-info", action="store_true", help="also write a LlamaFactory dataset_info.json")
     a = ap.parse_args()
     exclude = [p for p in a.exclude.split(",") if p]
     if os.path.exists(os.path.join(a.out, "manifest.json")) and not a.bench:
@@ -473,8 +482,9 @@ def main():
     final = final_names(names)
     merge(a.out, final)
     files = file_entries(a.out, totals, final)
-    with open(os.path.join(a.out, "dataset_info.json"), "w", encoding="utf-8") as f:
-        json.dump(dataset_info(a.out, files), f, ensure_ascii=False, indent=2)
+    if a.dataset_info:
+        with open(os.path.join(a.out, "dataset_info.json"), "w", encoding="utf-8") as f:
+            json.dump(dataset_info(a.out, files), f, ensure_ascii=False, indent=2)
     written = {b: collections.Counter() for b in totals}
     for b, t in totals.items():
         for full, n in t["written"].items():

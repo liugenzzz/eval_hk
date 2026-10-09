@@ -4,7 +4,7 @@
                 placeholders match the media lists, ids unique, row count == manifest
   accounting    per batch: rows read == rows in the DB, and written + held out + excluded + rejected == read
   media         a random sample of media paths exists on disk
-  dataset_info  every file is registered, and nothing else
+  dataset_info  if present: every file is registered, and nothing else
 
   python verify_export.py <export dir> [--sample 20000]
 """
@@ -47,7 +47,8 @@ def main():
     ap.add_argument("--sample", type=int, default=20000)
     a = ap.parse_args()
     man = json.load(open(os.path.join(a.out, "manifest.json"), encoding="utf-8"))
-    info = json.load(open(os.path.join(a.out, "dataset_info.json"), encoding="utf-8"))
+    info_path = os.path.join(a.out, "dataset_info.json")
+    info = json.load(open(info_path, encoding="utf-8")) if os.path.exists(info_path) else None
     problems = []
     ids = collections.defaultdict(set)
     reservoir, seen_media = [], 0
@@ -103,10 +104,11 @@ def main():
     if missing:
         problems.append(f"媒体缺失 {len(missing)}/{len(reservoir)}，如 {missing[:3]}")
 
-    registered = {os.path.relpath(v["file_name"], a.out) for v in info.values()}
-    if registered != set(man["files"]):
-        problems.append(f"dataset_info 与文件不一致：多 {registered - set(man['files'])} 少 {set(man['files']) - registered}")
-    print(f"=== dataset_info === {len(info)} 个注册，{'一致' if registered == set(man['files']) else '不一致'}")
+    if info is not None:  # optional (export_train_data.py --dataset-info)
+        registered = {os.path.relpath(v["file_name"], a.out) for v in info.values()}
+        if registered != set(man["files"]):
+            problems.append(f"dataset_info 与文件不一致：多 {registered - set(man['files'])} 少 {set(man['files']) - registered}")
+        print(f"=== dataset_info === {len(info)} 个注册，{'一致' if registered == set(man['files']) else '不一致'}")
 
     print("\n结果：" + ("全部通过" if not problems else f"{len(problems)} 个问题"))
     for p in problems:

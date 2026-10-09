@@ -4,7 +4,7 @@ Used when the exclusions change after a full export (e.g. more eval copies found
 affected batches into a scratch dir with --only, then splice them in. qa / vqa files of those batches are
 replaced; the merged <type>/pt/<type>.pt.jsonl files are rewritten without the old rows of those batches
 (matched by the "<batch>:" id prefix) and with the new ones appended. Rejects, manifest entries and
-dataset_info follow. Every other batch is left untouched.
+dataset_info (if the export has one) follow. Every other batch is left untouched.
 
   python export_train_data.py --out <scratch> --only b1,b2 --exclude-media <new list>
   python splice_export.py <out> <scratch>
@@ -87,8 +87,9 @@ def main():
                                             "elapsed_minutes": new["elapsed_minutes"]})
     with open(os.path.join(out, "manifest.json"), "w", encoding="utf-8") as f:
         json.dump(man, f, ensure_ascii=False, indent=2)
-    with open(os.path.join(out, "dataset_info.json"), "w", encoding="utf-8") as f:
-        json.dump(dataset_info(out, man["files"]), f, ensure_ascii=False, indent=2)
+    if os.path.exists(os.path.join(out, "dataset_info.json")):
+        with open(os.path.join(out, "dataset_info.json"), "w", encoding="utf-8") as f:
+            json.dump(dataset_info(out, man["files"]), f, ensure_ascii=False, indent=2)
     print(f"spliced {sorted(batches)} into {len(touched)} files "
           f"(scratch {redo} now holds only its manifest; remove it when done)")
 
