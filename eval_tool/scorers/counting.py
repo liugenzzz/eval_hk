@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import math
+import re
 from typing import Any
 
 import pandas as pd
@@ -219,21 +220,28 @@ def score_exist_negative(data: pd.DataFrame, ctx: ScoringContext) -> pd.DataFram
     return _attach(data, rows)
 
 
-_YES = ("有", "是", "存在", "能找到", "看到", "yes")
-_NO = ("没有", "不存在", "未发现", "找不到", "看不到", "无", "不是", "no")
+_YES = ("有", "是", "存在", "能找到", "看到")
+_NO = ("没有", "不存在", "未发现", "没发现", "找不到", "看不到", "没看到", "未看到", "未见", "没见",
+       "无", "不是", "否")
+# 英文按字母边界认：子串匹配会在 snow / cannot / know 里找到 "no"。
+_EN_YES = re.compile(r"(?<![a-z])yes(?![a-z])")
+_EN_NO = re.compile(r"(?<![a-z])(?:no|not|none|nothing)(?![a-z])")
+# 含否定字、却不是否定的词：「无人机」在航拍数据里是常见类别，按子串认会把
+# 「图中有一架无人机」判成「没有」。复述的问题（「有没有货车？」「是否」）也不是答案。
+_NOT_NEGATION = re.compile(r"无人机|无人|无线|无法|无需|无须|无论|无关|无意|无疑|无损|无缝|无规则|有没有|有无|是否")
+_UNSURE = re.compile(r"无法确定|无法判断|无法确认|不确定|不能确定|难以判断|看不清|not sure|unclear|can'?t tell|cannot tell")
 
 
 def _answer_says_yes(text: object) -> bool | None:
     raw = str(text or "").strip().lower()
-    if not raw:
+    if not raw or _UNSURE.search(raw):
         return None
+    body = _NOT_NEGATION.sub(" ", raw)
     # 先判否定：「没有」里含「有」，顺序反了会把每一条都判成 yes。
-    for token in _NO:
-        if token in raw:
-            return False
-    for token in _YES:
-        if token in raw:
-            return True
+    if any(token in body for token in _NO) or _EN_NO.search(body):
+        return False
+    if any(token in body for token in _YES) or _EN_YES.search(body):
+        return True
     number = parse_count(raw)
     if number is not None:
         return number > 0

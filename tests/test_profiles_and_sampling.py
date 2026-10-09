@@ -33,7 +33,7 @@ def test_every_shipped_profile_parses():
 
 def test_profile_supplies_the_bulk_and_config_only_overrides():
     merged = apply_profile({"profile": {"name": "grounding_zh_v1"}, "tsv_dir": "data"})
-    assert len(merged["datasets"]) == 11
+    assert len(merged["datasets"]) == 12  # + spatial_relation
     assert len(merged["report"]["dims"]) == 11
     assert merged["tsv_dir"] == "data"
 
@@ -244,9 +244,9 @@ def test_example_configs_carry_no_scoring_rules(name):
     # 就得调一次阈值，调的次数比它抓到的问题还多。上面那条才是要守的东西。
 
 
-def test_det_example_still_resolves_to_the_full_eleven_datasets():
+def test_det_example_still_resolves_to_the_full_twelve_datasets():
     parsed = load_pipeline_config("det.example.json")
-    assert len(parsed.datasets) == 11
+    assert len(parsed.datasets) == 12  # + spatial_relation
     assert len(parsed.derive_plans) == 3
     assert len(parsed.report_dims) == 11
     assert parsed.dataset_weights["ground_box"] == 0.40

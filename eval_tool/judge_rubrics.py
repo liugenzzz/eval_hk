@@ -101,14 +101,47 @@ def extract_json_object(content: str) -> dict[str, Any]:
             continue
         if isinstance(obj, dict):
             candidates.append(obj)
-    if not candidates:
-        return json.loads(text)   # surface the decode error with the raw content
     verdict_keys = {"rubric", "equipment_correct", "correct", "relevance_score",
                     "fabrication_score", "fact_score"}
+    if not candidates:
+        salvaged = _salvage_fields(text)
+        if verdict_keys & salvaged.keys():
+            return salvaged
+        return json.loads(text)   # surface the decode error with the raw content
     for obj in reversed(candidates):
         if verdict_keys & obj.keys():
             return obj
     return candidates[-1]
+
+
+_SCALAR_FIELD = re.compile(
+    r'"(\w+)"\s*:\s*(-?\d+(?:\.\d+)?|true|false|null|"[^"\\\n]{0,80}")\s*(?=[,}\n])', re.I)
+_LIST_FIELD = re.compile(r'"(\w+)"\s*:\s*(\[[^\[\]{}]*\])')
+_REASON_FIELD = re.compile(r'"(reasoning|reason)"\s*:\s*"(.*)', re.S)
+
+
+def _salvage_fields(text: str) -> dict[str, Any]:
+    """Read a verdict whose free-text reason broke the JSON field by field.
+
+    The judge sometimes writes an unescaped quote inside its reason, or doubles the
+    quote before a key; json.loads then drops the whole row although every score is
+    there. Scalars and flat lists are read one by one (the first occurrence wins, as
+    the reason may quote a field name) and the reason is kept as raw text; the rubric
+    parser still rejects the row if a field it needs is missing.
+    """
+    obj: dict[str, Any] = {}
+    reason = _REASON_FIELD.search(text)
+    head = text[:reason.start()] if reason else text
+    for key, raw in _SCALAR_FIELD.findall(head):
+        obj.setdefault(key, json.loads(raw.lower() if raw.lower() in {"true", "false", "null"} else raw))
+    for key, raw in _LIST_FIELD.findall(head):
+        try:
+            obj.setdefault(key, json.loads(raw))
+        except json.JSONDecodeError:
+            pass
+    if reason:
+        obj[reason.group(1)] = re.sub(r'"\s*}\s*$', "", reason.group(2)).strip()
+    return obj
 
 
 # ==================================================================================
@@ -208,11 +241,11 @@ def parse_v3(obj: dict[str, Any]) -> dict[str, object]:
             "reason": str(obj.get("reasoning", obj.get("reason", ""))), **out}
 
 
-def parse_v4(obj: dict[str, Any]) -> dict[str, object]:
-    if "equipment_correct" not in obj:
-        raise ValueError("missing equipment_correct")
-    equipment_correct = (obj["equipment_correct"] is True
-                         or str(obj["equipment_correct"]).strip().lower() == "true")
+def _parse_gated(obj: dict[str, Any], gate: str) -> tuple[bool, dict[str, object]]:
+    """v4's scoring: accuracy axes, fabrication multiplier, and a gate that caps the total."""
+    if gate not in obj:
+        raise ValueError(f"missing {gate}")
+    passed = obj[gate] is True or str(obj[gate]).strip().lower() == "true"
 
     applicable, parsed = _collect(obj, V4_ACC_WEIGHTS, V4_NULLABLE, 0, 100)
     accuracy = _weighted_renormalized(applicable, V4_ACC_WEIGHTS)
@@ -225,21 +258,35 @@ def parse_v4(obj: dict[str, Any]) -> dict[str, object]:
                           + (1.0 - V4_FABRICATION_FLOOR) * (fabrication / 100.0))
     if V4_STYLE_BLEND:
         quality = (1.0 - V4_STYLE_BLEND) * quality + V4_STYLE_BLEND * style
-    if not equipment_correct:
+    if not passed:
         quality = min(quality, V4_WRONG_EQUIPMENT_CAP)
 
     out = _blank()
     out.update({
         "quality_score": round(quality, 2),
         "accuracy_score": round(accuracy, 2),
-        "equipment_correct": equipment_correct,
         "applicable_dims": ",".join(sorted(applicable)),
         "fabrication_score": fabrication,
         "style_score": style,
         **{k: v for k, v in parsed.items()},
     })
-    return {"hit": 1 if quality >= PASS_THRESHOLD else 0,
-            "reason": str(obj.get("reasoning", obj.get("reason", ""))), **out}
+    return passed, {"hit": 1 if quality >= PASS_THRESHOLD else 0,
+                    "reason": str(obj.get("reasoning", obj.get("reason", ""))), **out}
+
+
+def parse_v4(obj: dict[str, Any]) -> dict[str, object]:
+    equipment_correct, result = _parse_gated(obj, "equipment_correct")
+    result["equipment_correct"] = equipment_correct
+    return result
+
+
+def parse_doc_v2(obj: dict[str, Any]) -> dict[str, object]:
+    """Book / journal pages: v4's axes and caps, gated on answering the question asked
+    instead of on naming the right equipment (pages are formulas, methods, metadata...)."""
+    on_topic, result = _parse_gated(obj, "on_topic")
+    if not on_topic:
+        result["failure_type"] = "off_topic"
+    return result
 
 
 def _parse_binary(obj: dict[str, Any], want_equipment: bool) -> dict[str, object]:
@@ -316,7 +363,8 @@ def parse_legacy_5(obj: dict[str, Any]) -> dict[str, object]:
 # ==================================================================================
 
 PARSERS = {"v1": parse_v1, "v2": parse_v2, "v3": parse_v3, "v3b": parse_v3b,
-           "v4": parse_v4, "v4b": parse_v4b, "industrial_v1": parse_industrial_v1}
+           "v4": parse_v4, "v4b": parse_v4b, "industrial_v1": parse_industrial_v1,
+           "doc_v2": parse_doc_v2}
 
 
 def parse_pointwise(content: str) -> dict[str, object]:
@@ -327,6 +375,8 @@ def parse_pointwise(content: str) -> dict[str, object]:
         return PARSERS[tag](obj)
 
     # Untagged: infer from keys, using each format's original semantics.
+    if "on_topic" in obj and "fabrication_score" in obj:
+        return parse_doc_v2(obj)
     if "equipment_correct" in obj and "fabrication_score" in obj:
         return parse_v4(obj)
     if "relevance_score" in obj:

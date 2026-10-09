@@ -1,0 +1,307 @@
+{
+  "datasets": {
+    "aircraft_presence": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_presence",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "discrimination"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_category": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_category",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "classification_open",
+              "classification_mc"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_grounding": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_grounding",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "grounding_single",
+              "grounding_all"
+            ],
+            "turn": 1
+          }
+        ],
+        "iou_gate": 0.5,
+        "scale": 1000
+      }
+    },
+    "aircraft_refusal": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_grounding",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "grounding_negative",
+              "grounding_counterfactual"
+            ],
+            "turn": 1
+          }
+        ],
+        "iou_gate": 0.5,
+        "scale": 1000
+      }
+    },
+    "aircraft_region": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_region",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "region_word"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_pair": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_presence",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "pair_compare"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_referring": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_region_presence",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "referring_region"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_dialog_check": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_presence",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "multi_turn"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_dialog_ground": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_grounding",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "multi_turn"
+            ],
+            "turn": 2
+          }
+        ],
+        "iou_gate": 0.5,
+        "scale": 1000
+      }
+    },
+    "aircraft_dialog_severity": {
+      "name": "aircraft_eval",
+      "kind": "judge_text",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "multi_turn"
+            ],
+            "turn": 3
+          }
+        ]
+      }
+    },
+    "aircraft_counting": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_counting",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "counting"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_uncertainty": {
+      "name": "aircraft_eval",
+      "kind": "aircraft_uncertainty",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "uncertainty"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_description": {
+      "name": "aircraft_eval",
+      "kind": "judge_text",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "description"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_severity": {
+      "name": "aircraft_eval",
+      "kind": "judge_text",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "severity_action"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
+    "aircraft_object": {
+      "name": "aircraft_eval",
+      "kind": "judge_text",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "object_recognition"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    }
+  },
+  "enabled_datasets": [
+    "aircraft_presence",
+    "aircraft_category",
+    "aircraft_grounding",
+    "aircraft_refusal",
+    "aircraft_region",
+    "aircraft_pair",
+    "aircraft_referring",
+    "aircraft_dialog_check",
+    "aircraft_dialog_ground",
+    "aircraft_dialog_severity",
+    "aircraft_counting",
+    "aircraft_uncertainty",
+    "aircraft_description",
+    "aircraft_severity",
+    "aircraft_object"
+  ],
+  "report": {
+    "dims": [
+      {
+        "key": "task_type",
+        "from": "task_type"
+      },
+      {
+        "key": "defect_type",
+        "from": "meta.defect_type",
+        "min_n": 30
+      },
+      {
+        "key": "source_dataset",
+        "from": "meta.source_dataset",
+        "min_n": 30
+      },
+      {
+        "key": "domain",
+        "from": "meta.domain",
+        "min_n": 30
+      },
+      {
+        "key": "size_bucket",
+        "from": "meta.size_bucket",
+        "only_kinds": [
+          "aircraft_grounding"
+        ]
+      },
+      {
+        "key": "image_status",
+        "from": "meta.image_status",
+        "only_kinds": [
+          "aircraft_presence"
+        ]
+      }
+    ],
+    "dataset_weights": {
+      "aircraft_presence": 0.2,
+      "aircraft_category": 0.2,
+      "aircraft_grounding": 0.2,
+      "aircraft_refusal": 0.2,
+      "aircraft_region": 0.2,
+      "aircraft_pair": 0.0,
+      "aircraft_referring": 0.0,
+      "aircraft_dialog_check": 0.0,
+      "aircraft_dialog_ground": 0.0,
+      "aircraft_dialog_severity": 0.0,
+      "aircraft_counting": 0.0,
+      "aircraft_uncertainty": 0.0,
+      "aircraft_description": 0.0,
+      "aircraft_severity": 0.0,
+      "aircraft_object": 0.0
+    }
+  },
+  "infer": {
+    "prompt_file": "prompts/infer_vqa_raw.txt",
+    "max_new_tokens": 1024
+  },
+  "do_pointwise": true,
+  "do_pairwise": false,
+  "do_length_control": true,
+  "judge": {
+    "prompt_files": {
+      "pointwise": "prompts/judge_vqa_pointwise.txt",
+      "pairwise": "prompts/judge_vqa_pairwise.txt"
+    }
+  }
+}

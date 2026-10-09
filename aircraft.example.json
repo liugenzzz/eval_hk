@@ -1,0 +1,29 @@
+{
+  "profile": {
+    "name": "aircraft_maintenance_v2",
+    "version": "v2"
+  },
+  "tsv_dir": "data/aircraft_vqa",
+  "eval_set": "aircraft_eval_v2",
+  "work_dir": "eval_output/aircraft/work",
+  "out_dir": "eval_output/aircraft/report",
+  "cache_dir": "eval_output/aircraft/cache",
+  "models": [
+    {
+      "name": "base",
+      "model_path": "/path/to/Qwen3-VL-8B-Instruct"
+    },
+    {
+      "name": "sft",
+      "model_path": "/path/to/aircraft-checkpoint"
+    }
+  ],
+  "baseline_model": "base",
+  "infer": {
+    "gpu_ids": [
+      0
+    ],
+    "workers_per_gpu": 1,
+    "batch_size": 1
+  }
+}

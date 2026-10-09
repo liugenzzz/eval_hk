@@ -45,6 +45,11 @@ class JudgeSettings:
     # 端口上（不同 checkpoint、不同量化）时 model 字段一样，不隔开的话第二路会直接
     # 读到第一路的判词，然后报出「两个裁判完全一致」—— 那是缓存串了，不是结论。
     label: str = ""
+    # Qwen3.x 经 vLLM 部署时默认开思考：回复前面是一大段推理，推理里常常就写着
+    # {"score": …} 这样的半成品。思考把 max_tokens 用完时，最后一个完整的 JSON 是
+    # 推理里的那个，判词就是错的。False = 请求里带 chat_template_kwargs 关掉思考；
+    # None = 不带这个字段（给不认它的 API 用）。
+    enable_thinking: bool | None = False
 
     @property
     def fingerprint(self) -> str:
@@ -64,6 +69,10 @@ class JudgeSettings:
         # 空 label 不进 blob：主裁判的指纹保持和以前逐位相同，旧缓存照常命中。
         if self.label:
             blob = f"{blob}|@{self.label}"
+        # 显式打开思考判出来的是另一份判词，单独一个缓存命名空间。关（默认）和不带开关
+        # 保持原指纹：主裁判的指纹不许变，攒下来的判词缓存要照常命中。
+        if self.enable_thinking:
+            blob = f"{blob}|think=1"
         return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
 
 
@@ -108,15 +117,15 @@ class JudgeClient:
     ) -> str:
         if type(max_tokens) is not int or max_tokens < 1:
             raise ValueError("max_tokens must be a positive integer")
-        body = json.dumps(
-            {
-                "model": self.settings.model,
-                "messages": messages,
-                "temperature": self.settings.temperature,
-                "max_tokens": max_tokens,
-            },
-            ensure_ascii=False,
-        ).encode("utf-8")
+        payload: dict[str, Any] = {
+            "model": self.settings.model,
+            "messages": messages,
+            "temperature": self.settings.temperature,
+            "max_tokens": max_tokens,
+        }
+        if self.settings.enable_thinking is not None:
+            payload["chat_template_kwargs"] = {"enable_thinking": bool(self.settings.enable_thinking)}
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(
             self.settings.api_base,
             data=body,
@@ -128,7 +137,9 @@ class JudgeClient:
         )
         with urllib.request.urlopen(req, timeout=self.settings.timeout) as resp:
             out = json.loads(resp.read().decode("utf-8"))
-        return out["choices"][0]["message"]["content"]
+        content = out["choices"][0]["message"]["content"] or ""
+        # 思考没关掉（或服务端不认开关）时，判词在最后一个 </think> 之后；前面的推理不能进解析。
+        return content.rsplit("</think>", 1)[-1].strip() if "</think>" in content else content
 
     def judge_messages(
         self,

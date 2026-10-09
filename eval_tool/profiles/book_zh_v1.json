@@ -18,8 +18,8 @@
   },
   "judge": {
     "prompt_files": {
-      "pointwise": "prompts/judge_equip_pointwise_v4.txt",
-      "pairwise": "prompts/judge_equip_pairwise.txt"
+      "pointwise": "prompts/judge_doc_pointwise_v2.txt",
+      "pairwise": "prompts/judge_doc_pairwise_v1.txt"
     }
   },
   "report": {
@@ -33,7 +33,12 @@
   },
   "min_category_n": 10,
   "category_weights": {
-    "作战应用": 1.0,
-    "拱形基础": 1.0
+    "共性基础": 1.0,
+    "研发设计": 1.0,
+    "生产制造": 1.0,
+    "试验测试": 1.0,
+    "维修保障": 1.0,
+    "运营管理": 1.0,
+    "作战应用": 1.0
   }
 }

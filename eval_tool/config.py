@@ -106,6 +106,44 @@ class EvalConfig:
         return dict(self.dataset_params.get(dataset_key) or {})
 
 
+# 推理解码参数，原样传给 model.generate。评估默认贪心：Qwen3-VL 各 checkpoint 自带
+# 的 generation_config 是 do_sample=true / temperature=0.7，不覆盖的话同一个模型跑两
+# 遍分数就不一样，两个 checkpoint 之间的差距里混着采样噪声。要采样就在
+# infer.generation 里写明（如 {"do_sample": true, "temperature": 0.7, "top_p": 0.8}）。
+DEFAULT_GENERATION: dict[str, Any] = {"do_sample": False}
+GENERATION_KEYS = {"do_sample", "temperature", "top_p", "top_k", "repetition_penalty", "num_beams"}
+
+
+def _generation_settings(infer_raw: Mapping[str, Any]) -> dict[str, Any]:
+    raw = infer_raw.get("generation")
+    if raw is None:
+        return dict(DEFAULT_GENERATION)
+    if not isinstance(raw, dict):
+        raise ConfigError("infer.generation must be an object")
+    unknown = sorted(set(raw) - GENERATION_KEYS)
+    if unknown:
+        raise ConfigError(f"infer.generation 不认识的键：{', '.join(unknown)}（可用：{', '.join(sorted(GENERATION_KEYS))}）")
+    return {**DEFAULT_GENERATION, **raw}
+
+
+# 视频抽帧。写死默认值而不是用 qwen_vl_utils 的：它的上限是 768 帧，一段长视频能吃掉
+# 几万个 token；而且库升级改默认值时，同一个配置会悄悄变成另一种抽法。
+DEFAULT_VIDEO: dict[str, Any] = {"fps": 2.0, "max_frames": 32, "max_pixels": 200704}
+VIDEO_KEYS = {"fps", "nframes", "min_frames", "max_frames", "min_pixels", "max_pixels", "total_pixels"}
+
+
+def _video_settings(infer_raw: Mapping[str, Any]) -> dict[str, Any]:
+    raw = infer_raw.get("video")
+    if raw is None:
+        return dict(DEFAULT_VIDEO)
+    if not isinstance(raw, dict):
+        raise ConfigError("infer.video must be an object")
+    unknown = sorted(set(raw) - VIDEO_KEYS)
+    if unknown:
+        raise ConfigError(f"infer.video 不认识的键：{', '.join(unknown)}（可用：{', '.join(sorted(VIDEO_KEYS))}）")
+    return {**DEFAULT_VIDEO, **raw}
+
+
 @dataclass(frozen=True)
 class InferConfig:
     model_name: str
@@ -129,6 +167,8 @@ class InferConfig:
     clean_partial: bool = False
     image_min_pixels: int | None = None
     image_max_pixels: int | None = None
+    generation: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_GENERATION))
+    video: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_VIDEO))
     # 真值是 jsonl 时要用的读取参数（select / image_root / category_field）。
     # 推理端和评估端读的必须是同一批行，所以这里传的和 EvalConfig.dataset_params
     # 是同一份东西；TSV 真值用不到，留空即可。
@@ -158,6 +198,8 @@ class PipelineInferSettings:
     workers_per_gpu: int = 1
     image_min_pixels: int | None = None
     image_max_pixels: int | None = None
+    generation: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_GENERATION))
+    video: dict[str, Any] = field(default_factory=lambda: dict(DEFAULT_VIDEO))
 
 
 @dataclass(frozen=True)
@@ -258,6 +300,8 @@ class PipelineConfig:
                     clean_partial=clean_partial,
                     image_min_pixels=self.infer.image_min_pixels,
                     image_max_pixels=self.infer.image_max_pixels,
+                    generation=dict(self.infer.generation),
+                    video=dict(self.infer.video),
                     dataset_params={
                         key: dict(params)
                         for key, params in self.dataset_params.items()
@@ -326,6 +370,8 @@ class PipelineConfig:
 
 
 PROFILE_DIR = Path(__file__).resolve().parent / "profiles"
+# profile 里的提示词路径（prompts/...）是相对仓库根目录写的。
+REPO_DIR = PROFILE_DIR.parent.parent
 
 
 def _deep_merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
@@ -352,6 +398,32 @@ def _strip_nulls(value: Any) -> Any:
     if isinstance(value, list):
         return [_strip_nulls(item) for item in value]
     return value
+
+
+def _anchor_profile_prompts(profile: dict[str, Any]) -> dict[str, Any]:
+    """把 profile 自带的提示词路径钉到仓库根目录上。
+
+    配置里的相对路径按配置文件所在目录解析，这对用户自己写的路径是对的；但 profile
+    里的 ``prompts/infer_vqa_raw.txt`` 是相对仓库写的。不钉住的话，只有放在仓库根目录
+    的配置才跑得通，配置一挪到别处（比如放在输出目录旁边），推理一开始就找不到提示词。
+    用户在配置里自己写的 prompt_file(s) 合并时会盖掉这里，仍按配置目录解析。
+    """
+    def anchor(value: Any) -> Any:
+        if isinstance(value, str) and value.strip() and not Path(value).is_absolute():
+            return str(REPO_DIR / value)
+        return value
+
+    for section, keys in (("infer", ("prompt_file", "prompt_files")), ("judge", ("prompt_files",))):
+        block = profile.get(section)
+        if not isinstance(block, dict):
+            continue
+        for key in keys:
+            value = block.get(key)
+            if isinstance(value, dict):
+                block[key] = {name: anchor(item) for name, item in value.items()}
+            elif value is not None:
+                block[key] = anchor(value)
+    return profile
 
 
 def apply_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -384,7 +456,7 @@ def apply_profile(raw: Mapping[str, Any]) -> dict[str, Any]:
             f"未知的 profile：{name!r}。内置的有：{', '.join(available) or '（无）'}。"
             "自定义评估直接写 datasets，不要写 profile.name。"
         )
-    profile = json.loads(path.read_text(encoding="utf-8"))
+    profile = _anchor_profile_prompts(json.loads(path.read_text(encoding="utf-8")))
     merged = _strip_nulls(_deep_merge(profile, raw))
 
     eval_set = str(raw.get("eval_set") or "").strip()
@@ -764,6 +836,8 @@ def load_pipeline_config(path: str | Path) -> PipelineConfig:
         workers_per_gpu=max(1, int(infer_raw.get("workers_per_gpu", 1))),
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
+        generation=_generation_settings(infer_raw),
+        video=_video_settings(infer_raw),
     )
 
     judge = _pipeline_judge_settings(raw.get("judge"), base_dir)
@@ -868,6 +942,7 @@ def load_config(path: str | Path) -> EvalConfig:
         max_retries=int(judge_raw.get("max_retries") or raw.get("MAX_RETRIES") or JudgeSettings.max_retries),
         pointwise_prompt=pointwise_prompt,
         pairwise_prompt=pairwise_prompt,
+        enable_thinking=_judge_thinking(judge_raw),
     )
     cross_check_judges = parse_cross_check_judges(judge_raw, judge)
     return EvalConfig(
@@ -946,6 +1021,8 @@ def load_infer_config(path: str | Path) -> InferConfig:
         ),
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
+        generation=_generation_settings(infer_raw),
+        video=_video_settings(infer_raw),
         dataset_params=dataset_params,
     )
 
@@ -1123,7 +1200,16 @@ def _pipeline_judge_settings(value: object, base_dir: Path) -> JudgeSettings:
             base_dir,
             JudgeSettings.pairwise_prompt,
         ),
+        enable_thinking=_judge_thinking(raw),
     )
+
+
+def _judge_thinking(raw: Mapping[str, Any]) -> bool | None:
+    """judge.enable_thinking：默认 False（关思考）；写 null 则请求里不带这个开关。"""
+    if "enable_thinking" not in raw:
+        return JudgeSettings.enable_thinking
+    value = raw["enable_thinking"]
+    return None if value is None else bool(value)
 
 
 def _parse_report_block(

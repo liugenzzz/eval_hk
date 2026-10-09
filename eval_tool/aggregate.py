@@ -32,6 +32,40 @@ def bootstrap_binary_ci(values: Sequence[object], n_bootstrap: int = 1000, seed:
     return bootstrap_mean_ci(values, n_bootstrap=n_bootstrap, seed=seed)
 
 
+def bootstrap_cluster_mean_ci(
+    values: Sequence[object],
+    clusters: Sequence[object],
+    n_bootstrap: int = 1000,
+    seed: int = 42,
+) -> tuple[float, float]:
+    """按簇（同一张图 / 同一段视频）重抽样的均值置信区间。
+
+    同一张图上的几道题不是独立样本：模型认不出这张图，几道题一起错。按行重抽样
+    把它们当独立的，区间偏窄，两个 checkpoint 的差距看上去比实际更显著（lmms-eval
+    的 clustered standard error 讲的就是这件事）。这里整簇抽，均值取抽中各簇的
+    总和之比。每簇只有一行时退回按行重抽样，结果和以前逐位相同。
+    """
+    ids = pd.Series(list(clusters), dtype=object)
+    # 没有簇标识的行（派生集的行不带 source_id）各算一簇。不能靠 astype(str) 把 NaN 变成
+    # "nan"：pandas 3 的 astype(str) 保留缺失值，groupby 又默认丢掉缺失键，整个切片会被
+    # 丢光，区间算成 NaN。
+    ids = ids.where(ids.notna(), pd.Series([f"__row{i}" for i in range(len(ids))], dtype=object))
+    frame = pd.DataFrame({
+        "v": pd.to_numeric(pd.Series(list(values)), errors="coerce"),
+        "c": ids.map(str),
+    }).dropna(subset=["v"])
+    grouped = frame.groupby("c", dropna=False)["v"]
+    if frame.empty or grouped.size().max() <= 1:
+        return bootstrap_mean_ci(frame["v"], n_bootstrap=n_bootstrap, seed=seed)
+    sums = grouped.sum().to_numpy(dtype=float)
+    counts = grouped.count().to_numpy(dtype=float)
+    rng = np.random.default_rng(seed)
+    picks = rng.integers(0, len(sums), size=(n_bootstrap, len(sums)))
+    means = sums[picks].sum(axis=1) / counts[picks].sum(axis=1)
+    low, high = np.quantile(means, [0.025, 0.975])
+    return round(float(low), 4), round(float(high), 4)
+
+
 def bootstrap_paired_diff_ci(
     challenger: Sequence[object],
     baseline: Sequence[object],
@@ -173,7 +207,12 @@ def summarize_binary_metric(
         if not isinstance(group_key, tuple):
             group_key = (group_key,)
         values = group[metric_col].dropna().astype(float)
-        low, high = bootstrap_binary_ci(values, n_bootstrap=bootstrap_n, seed=seed)
+        if "source_id" in group.columns:
+            # source_id 是图 / 视频 / 记录的标识：同一张图上的几道题按一簇重抽样
+            low, high = bootstrap_cluster_mean_ci(
+                values, group.loc[values.index, "source_id"], n_bootstrap=bootstrap_n, seed=seed)
+        else:
+            low, high = bootstrap_binary_ci(values, n_bootstrap=bootstrap_n, seed=seed)
         row = {col: value for col, value in zip(group_cols, group_key)}
         row.update(
             {

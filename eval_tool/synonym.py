@@ -37,6 +37,13 @@ class SynonymVerdict:
         }
 
 
+_RELATION_ALIASES = {
+    "synonym": EXACT, "synonymous": EXACT, "same": EXACT, "equivalent": EXACT, "同义": EXACT,
+    "broader": HYPERNYM, "上位": HYPERNYM, "narrower": HYPONYM, "下位": HYPONYM,
+    "different": NONE, "unrelated": NONE, "无关": NONE,
+}
+
+
 def parse_synonym(content: str) -> SynonymVerdict:
     text = str(content or "").strip()
     fence = _FENCE.search(text)
@@ -53,6 +60,9 @@ def parse_synonym(content: str) -> SynonymVerdict:
         raise ValueError(f"裁判输出缺少 same：{str(data)[:200]}")
     same = bool(data["same"])
     relation = str(data.get("relation", EXACT if same else NONE)).strip().lower()
+    # 提示词把 exact 写成「就是同一个说法」，裁判常把换了说法的同义词另记成 synonym。
+    # 同义正是这个兜底要抬的那一档，按 exact 收；不收的话同义回答全因「取值非法」判错。
+    relation = _RELATION_ALIASES.get(relation, relation)
     if relation not in RELATIONS:
         raise ValueError(f"relation 取值非法：{relation!r}")
     # same=false 时 relation 必须是 none，否则两个字段自相矛盾，判词不可信。

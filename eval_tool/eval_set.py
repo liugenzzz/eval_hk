@@ -105,7 +105,7 @@ def split_turns(conversations: Sequence[Mapping[str, Any]]) -> list[tuple[str, s
 
 
 def clean_question(value: str) -> str:
-    return str(value or "").replace("<image>", "").strip()
+    return str(value or "").replace("<image>", "").replace("<video>", "").strip()
 
 
 def content_to_text(content: Any) -> str:
@@ -233,6 +233,10 @@ def record_to_rows(
     image_names = record.get("images") or record.get("image") or []
     if isinstance(image_names, str):
         image_names = [image_names]
+    # 视频不编 base64（一个就是几十 MB），只带路径，推理时再抽帧。
+    video_names = record.get("videos") or record.get("video") or []
+    if isinstance(video_names, str):
+        video_names = [video_names]
     turns = split_turns(normalize_conversations(record))
     category = category_of(record, metadata, category_field, default_category)
 
@@ -245,8 +249,10 @@ def record_to_rows(
         cumulative = image_names[:images_used] if images_used else image_names
         question = clean_question(human_value)
         answer = str(gpt_value).strip()
+        video_cell = {"video_files": json.dumps(video_names, ensure_ascii=False)} if video_names else {}
         rows.append(
             {
+                **video_cell,
                 "index": f"{record_id}__t{turn_index}",
                 "sample_id": record_id,
                 "task_type": task_type,
@@ -308,13 +314,30 @@ def sample_records(
     if sample_n is None or sample_n <= 0 or sample_n >= len(records):
         return [dict(record) for record in records]
     salt = str(seed)
+
+    # CircularEval 的轮转版本（metadata.circular_id 相同）是一道题，要么整组抽中要么
+    # 整组不抽：拆开的组打分器不下结论，抽样就等于把这些题白白丢了。没有 circular_id
+    # 的记录按自己的 id 排，和以前逐条相同。
+    def group_of(record: Mapping[str, Any]) -> str:
+        metadata = record.get("metadata") or {}
+        return str(metadata.get("circular_id") or record.get("id", ""))
+
     ranked = sorted(
         records,
-        key=lambda record: hashlib.sha256(
-            f"{salt}|{record.get('id', '')}".encode("utf-8")
-        ).digest(),
+        key=lambda record: (
+            hashlib.sha256(f"{salt}|{group_of(record)}".encode("utf-8")).digest(),
+            str(record.get("id", "")),
+        ),
     )
-    return [dict(record) for record in ranked[:sample_n]]
+    picked: list[dict[str, Any]] = []
+    last_group = None
+    for record in ranked:
+        group = group_of(record)
+        if len(picked) >= sample_n and group != last_group:
+            break
+        picked.append(dict(record))
+        last_group = group
+    return picked
 
 
 def load_eval_set(

@@ -115,6 +115,8 @@ v1  v2  v3  v3b  v4  v4b
 
 `--rubric v4` 指定一版；`--rubric` 换版本会**换掉判词缓存的指纹**，自动重判而不是拿旧判词冒充新口径。`sweep` 一次跑多版并出比较表，用来看 rubric 之间一致不一致 —— 一致率低说明 rubric 有歧义，**先改提示词再看分数**，否则是在解读噪声。
 
+书籍 / 期刊（`book_zh_v1`）默认用 `doc_v1`（`prompts/judge_doc_pointwise_v1.txt`，领域中立的文档问答口径）。装备 rubric 把每道题都当成装备问答，书页上公式、管理方法之类内容的正确回答会被判成「答非所问」。要复现改之前的书籍分数，用 `--rubric v4`。
+
 `score_summary.csv` 的 `total_score` 按 `category_weights` 对六个能力维度（P1/P2/P3/R1/R2/R3）加权。样本数少于 30 的维度不进总分但单独出行 —— 一个 n=2 的类别拿满分不该把总分拉上去。
 
 开放问答那条路的完整用法（数据转换、长度控制、成对判定）见 **[docs/guides/开放问答评估_使用说明.md](docs/guides/开放问答评估_使用说明.md)**。
@@ -144,7 +146,7 @@ v1  v2  v3  v3b  v4  v4b
 
 ### 评估集自带领域分类时，按分类分别出分
 
-书籍那批评估集每条自带一个领域分类（作战应用、拱形基础……七大类），要按这七类分别出分。
+书籍那批评估集每条自带一个领域分类（作战应用、共性基础……七大类），要按这七类分别出分。
 评估集是 jsonl 就不用转 TSV —— 真值按数据集名找，**优先 `<name>.jsonl` 再回落 `<name>.tsv`**，
 `conversations`（ShareGPT）和 `messages`（OpenAI）两种形状都认。配置两处：
 
@@ -338,8 +340,9 @@ prompts/
   infer_mcq.txt  infer_judge.txt  infer_vqa.txt        推理（装备 / 书籍共用）
   infer_vqa_equip.txt  infer_vqa_raw.txt
 
-  judge_equip_pointwise_v1..v4b.txt                    装备 / 书籍的裁判 rubric，六版
+  judge_equip_pointwise_v1..v4b.txt                    装备的裁判 rubric，六版
   judge_equip_pairwise.txt                             成对判定
+  judge_doc_pointwise_v1.txt  judge_doc_pairwise_v1.txt  书籍 / 期刊的裁判 rubric（doc_v1）
   judge_industrial_pointwise_v1.txt                    工业质检独立 rubric，四项准确性维度
   judge_vqa_pointwise.txt  judge_vqa_pairwise.txt      早期通路
 

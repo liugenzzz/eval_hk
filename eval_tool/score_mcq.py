@@ -19,9 +19,13 @@ class ChoiceExtraction:
 
 _EXPLICIT_PATTERNS = (
     r"(?:答案|正确答案|最终答案|选项|选择|我选|应选|应该选|answer|final answer|option)"
-    r"\s*(?:是|为|:|：|=)?\s*[\*\(\[【]?\s*([A-D])\b",
-    r"^\s*\*\*([A-D])\*\*",
+    r"\s*(?:是|为|:|：|=|is)?\s*[\*\(\[【]?\s*([A-H])\b",
+    r"^\s*\*\*([A-H])\*\*",
 )
+# 作答以选项字母开头（"B. A man opens the door" / "(C)" / "D：…"）。字母后面必须紧跟
+# 标点或结尾：只认大写、不认 "A man" 这种冠词。放在逐字母扫描之前，因为逐字母扫描
+# 会把选项文字里的冠词 A 也算进来，一条干净的作答就成了「多个候选」。
+_LEADING = re.compile(r"^\s*[\(\[【]?\s*([A-H])\s*(?:[.．、:：)\]】]|$)")
 
 
 def _normalize_choice(choice: object) -> str:
@@ -55,13 +59,17 @@ def _extract_independent_letters(text: str, valid: tuple[str, ...]) -> list[str]
     return [m.group(1).upper() for m in re.finditer(pattern, text.upper())]
 
 
+# 判断题的对/错词。「没错」「不错」是肯定，里面的「错」不算；英文按字母边界认，
+# 否则 "know" / "cannot" 里的 no、"incorrect" 里的 correct 都会被当成作答。
+_JUDGE_NEGATIVE = re.compile(r"不正确|不是|不对|错误|错|(?<!是)否|(?<![a-z])(?:false|incorrect|no)(?![a-z])")
+_JUDGE_POSITIVE = re.compile(r"正确|对|是|(?<![a-z])(?:true|correct|yes)(?![a-z])")
+
+
 def _extract_judge_word(text: str) -> str | None:
-    normalized = str(text or "").strip().lower()
-    negative_patterns = ("不正确", "不是", "不对", "错误", "错", "否", "false", "incorrect", "no")
-    positive_patterns = ("正确", "对", "是", "true", "correct", "yes")
-    if any(p in normalized for p in negative_patterns):
+    normalized = re.sub(r"没错|不错", "对", str(text or "").strip().lower())
+    if _JUDGE_NEGATIVE.search(normalized):
         return "B"
-    if any(p in normalized for p in positive_patterns):
+    if _JUDGE_POSITIVE.search(normalized):
         return "A"
     return None
 
@@ -101,6 +109,10 @@ def extract_choice(
     explicit = _from_found(_extract_explicit(text, valid), "explicit")
     if explicit:
         return explicit
+
+    leading = _LEADING.match(text)
+    if leading and leading.group(1) in valid:
+        return ChoiceExtraction(choice=leading.group(1), method="leading")
 
     if is_judge:
         judge_choice = _extract_judge_word(text)

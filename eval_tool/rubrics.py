@@ -18,8 +18,16 @@ RUBRIC_PROMPTS = {
     version: _PROMPT_ROOT / f"judge_equip_pointwise_{version}.txt"
     for version in RUBRIC_VERSIONS
 }
-RUBRIC_VERSIONS = RUBRIC_VERSIONS + ("industrial_v1",)
+RUBRIC_VERSIONS = RUBRIC_VERSIONS + ("industrial_v1", "doc_v1", "doc_v2", "video_ref_v1")
 RUBRIC_PROMPTS["industrial_v1"] = _PROMPT_ROOT / "judge_industrial_pointwise_v1.txt"
+# Book / journal pages: the equipment rubrics frame every question as equipment QA and
+# fail correct answers about any other content (a formula, a management method).
+# doc_v2 keeps v4's graded axes with a domain-neutral gate; doc_v1 is the pass/fail form.
+RUBRIC_PROMPTS["doc_v1"] = _PROMPT_ROOT / "judge_doc_pointwise_v1.txt"
+RUBRIC_PROMPTS["doc_v2"] = _PROMPT_ROOT / "judge_doc_pointwise_v2.txt"
+# Video QA: the judge gets no frames, so it scores against the reference text alone
+# (the Video-ChatGPT / lmms-eval practice) instead of describing an image it never saw.
+RUBRIC_PROMPTS["video_ref_v1"] = _PROMPT_ROOT / "judge_video_ref_pointwise_v1.txt"
 
 
 def validate_industrial_rubric(config: EvalConfig, prompt: str | None = None) -> None:

@@ -27,6 +27,7 @@ from .breakdown import (
     make_weighted_total,
     parse_dims,
 )
+from .io import excel_safe
 from .length_control import pairwise_length_control, pointwise_length_control
 from .industrial_rubric import INDUSTRIAL_COLUMNS
 from .industrial_report import summarize_industrial, summarize_industrial_status
@@ -119,6 +120,19 @@ def write_reports(
             )
         )
 
+        if any(kind.startswith("aircraft_") for kind in (dataset_kinds or {}).values()):
+            from .aircraft_report import summarize_aircraft
+
+            aircraft_metrics = summarize_aircraft(
+                all_details, dataset_kinds or {},
+                min_images=MIN_CATEGORY_N if min_category_n is None else min_category_n,
+                bootstrap_n=bootstrap_n, seed=seed,
+            )
+            if not aircraft_metrics.empty:
+                path = out / "aircraft_metrics.csv"
+                aircraft_metrics.to_csv(path, index=False, encoding="utf-8-sig")
+                written["aircraft_metrics.csv"] = path
+
         for model, table in make_cross_tables(all_details).items():
             path = out / f"cross_{_safe_name(model)}.csv"
             table.to_csv(path, index=False, encoding="utf-8-sig")
@@ -126,7 +140,7 @@ def write_reports(
 
         for (model, dataset), df in all_details.groupby(["model", "dataset"]):
             path = out / f"detail_{_safe_name(model)}_{dataset}.xlsx"
-            _detail_without_image(df).to_excel(path, index=False)
+            excel_safe(_detail_without_image(df)).to_excel(path, index=False)
             written[f"detail_{model}_{dataset}.xlsx"] = path
 
         # All models' judge results side by side in one file, for cross-model inspection.
@@ -159,7 +173,7 @@ def write_reports(
         ]
         combined_cols.extend(col for col in INDUSTRIAL_COLUMNS
                              if col in all_details.columns and col not in combined_cols)
-        _detail_without_image(all_details[combined_cols]).to_excel(combined_path, index=False)
+        excel_safe(_detail_without_image(all_details[combined_cols])).to_excel(combined_path, index=False)
         written["judge_detail_all.xlsx"] = combined_path
 
     if pairwise is not None and not pairwise.empty:
@@ -172,7 +186,7 @@ def write_reports(
         pairwise_summary.to_csv(pairwise_path, index=False, encoding="utf-8-sig")
         written["pairwise_vs_baseline.csv"] = pairwise_path
         detail_path = out / "pairwise_vs_baseline_detail.xlsx"
-        _detail_without_image(pairwise).to_excel(detail_path, index=False)
+        excel_safe(_detail_without_image(pairwise)).to_excel(detail_path, index=False)
         written["pairwise_vs_baseline_detail.xlsx"] = detail_path
 
     manifest = out / "manifest.json"

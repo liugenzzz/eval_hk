@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import socket
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -85,16 +86,28 @@ class InferenceLock:
 
     def __enter__(self) -> "InferenceLock":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(
-                str(self.path),
-                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
-            )
-        except FileExistsError as exc:
-            raise InferCacheError(f"inference already running: {self.path}") from exc
+        for attempt in (1, 2):
+            try:
+                descriptor = os.open(
+                    str(self.path),
+                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                )
+                break
+            except FileExistsError as exc:
+                # A run that was killed never releases its lock, and every later run
+                # then refuses to start. A lock taken on this host by a process that no
+                # longer exists is stale and is taken over; one from another host (the
+                # work dirs sit on shared NFS) cannot be checked from here and still blocks.
+                if attempt == 1 and self._stale():
+                    self.path.unlink(missing_ok=True)
+                    continue
+                raise InferCacheError(
+                    f"inference already running: {self.path} ({self._owner_text()})；"
+                    "确认没有在跑的话删掉这个锁文件"
+                ) from exc
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-                stream.write(f"pid={os.getpid()}\n")
+                stream.write(f"pid={os.getpid()}\nhost={socket.gethostname()}\n")
                 stream.flush()
                 os.fsync(stream.fileno())
         except Exception:
@@ -107,6 +120,29 @@ class InferenceLock:
         if self._acquired:
             self.path.unlink(missing_ok=True)
             self._acquired = False
+
+    def _owner(self) -> dict[str, str]:
+        try:
+            text = self.path.read_text(encoding="utf-8")
+        except OSError:
+            return {}
+        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+    def _owner_text(self) -> str:
+        owner = self._owner()
+        return ", ".join(f"{k}={v}" for k, v in owner.items()) or "owner unknown"
+
+    def _stale(self) -> bool:
+        owner = self._owner()
+        if owner.get("host") != socket.gethostname():
+            return False
+        try:
+            os.kill(int(owner.get("pid", "")), 0)
+        except ProcessLookupError:
+            return True
+        except (ValueError, PermissionError, OverflowError):
+            return False
+        return False
 
 
 class InferShardStore:
@@ -285,6 +321,8 @@ def build_infer_fingerprint(
     *,
     image_min_pixels: int | None = None,
     image_max_pixels: int | None = None,
+    generation: Mapping[str, Any] | None = None,
+    video: Mapping[str, Any] | None = None,
 ) -> str:
     image_min_pixels, image_max_pixels = validate_image_pixel_bounds(
         image_min_pixels,
@@ -305,6 +343,11 @@ def build_infer_fingerprint(
         "dataset_name": str(dataset_name),
         "input_digest": input_digest.hexdigest(),
     }
+    if generation is not None:
+        # 解码方式不同就是另一份预测：采样解出来的缓存不能被贪心的一趟当成现成的。
+        payload["generation"] = {str(k): generation[k] for k in sorted(generation)}
+    if video is not None:
+        payload["video"] = {str(k): video[k] for k in sorted(video)}
     if image_min_pixels is not None:
         payload["image_preprocess"] = {
             "profile": IMAGE_PREPROCESS_PROFILE,

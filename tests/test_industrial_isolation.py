@@ -31,13 +31,16 @@ def test_industrial_cannot_be_switched_to_equipment_rubric():
     assert not scorers.get("industrial_describe").pairwise
 
 
-def test_book_cannot_use_industrial_rubric_and_legacy_prompt_is_unchanged():
+def test_book_cannot_use_industrial_rubric_and_prompt_is_unchanged():
     config = load_pipeline_config(ROOT / "book.example.json").to_eval_config()
     original = config.judge.fingerprint
     with pytest.raises(RubricError, match="separate"):
         apply_rubric(config, "industrial_v1")
     assert config.judge.fingerprint == original
-    assert apply_rubric(config, "v4").judge.fingerprint == original
+    # the book default is the document rubric; the equipment rubric it used before
+    # stays selectable with --rubric v4, to reproduce earlier book numbers
+    assert apply_rubric(config, "doc_v2").judge.fingerprint == original
+    assert apply_rubric(config, "v4").judge.fingerprint != original
 
 
 def test_wrong_config_prompt_is_detected_without_cli_override():

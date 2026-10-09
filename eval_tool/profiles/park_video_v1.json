@@ -1,0 +1,45 @@
+{
+  "datasets": {
+    "park_mcq": {
+      "name": "park_video",
+      "kind": "choice_circular",
+      "params": {
+        "select": [{"task_type": ["park_mcq"], "turn": 1}],
+        "choices": ["A", "B", "C", "D", "E"],
+        "category_field": "behavior_category"
+      }
+    },
+    "park_behavior": {
+      "name": "park_video",
+      "kind": "choice_circular",
+      "params": {
+        "select": [{"task_type": ["park_behavior"], "turn": 1}],
+        "category_field": "behavior_category"
+      }
+    },
+    "park_open": {
+      "name": "park_video",
+      "kind": "judge_text",
+      "params": {
+        "select": [{"task_type": ["park_open"], "turn": 1}],
+        "category_field": "behavior_category"
+      }
+    }
+  },
+  "enabled_datasets": ["park_mcq", "park_behavior", "park_open"],
+  "infer": {
+    "prompt_file": "prompts/infer_vqa_raw.txt",
+    "max_new_tokens": 256
+  },
+  "judge": {
+    "prompt_files": {
+      "pointwise": "prompts/judge_video_ref_pointwise_v1.txt",
+      "pairwise": "prompts/judge_video_ref_pairwise_v1.txt"
+    }
+  },
+  "do_length_control": true,
+  "report": {
+    "dims": [{"key": "category", "from": "category", "min_n": 10}],
+    "dataset_weights": {"park_mcq": 0.6, "park_behavior": 0.4, "park_open": 0.0}
+  }
+}

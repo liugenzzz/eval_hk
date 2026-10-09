@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import copy
 import io
+import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -110,6 +112,11 @@ class QwenVLGenerator:
     device_map: str = "auto"
     image_min_pixels: int | None = None
     image_max_pixels: int | None = None
+    # 覆盖 checkpoint 自带 generation_config 的解码参数；None = 照 checkpoint 的来。
+    # 评估通路总是传（默认贪心），DPO 采样通路不传，保持原样。
+    generation: Mapping[str, Any] | None = None
+    # 视频抽帧参数（fps / max_frames / max_pixels …），原样写进 qwen_vl_utils 的视频片段。
+    video: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         self.image_min_pixels, self.image_max_pixels = validate_image_pixel_bounds(
@@ -170,6 +177,20 @@ class QwenVLGenerator:
             device_map=self.device_map,
             trust_remote_code=True,
         )
+        self._generation_config = None
+        if self.generation is not None:
+            config = copy.deepcopy(self.model.generation_config)
+            if not self.generation.get("do_sample", False):
+                # 贪心时把 checkpoint 带的采样参数复位成中性值：留着 0.7 的话它们不起作用，
+                # 还会让人以为这次是按 temperature=0.7 解的码。不能设 None —— transformers 5
+                # 会拿 checkpoint 的默认值把 None 补回来，然后每一批都警告一次。
+                for name, neutral in (("temperature", 1.0), ("top_p", 1.0), ("top_k", 50)):
+                    setattr(config, name, neutral)
+            for name, value in self.generation.items():
+                setattr(config, name, value)
+            # max_new_tokens 也放进同一个 config：和 generation_config 分开传已被弃用
+            config.max_new_tokens = self.max_new_tokens
+            self._generation_config = config
 
     def generate(self, prompt: str | list[dict[str, Any]], image_b64: str | list[str] | None = None) -> str:
         return self.generate_batch([prompt], [image_b64])[0]
@@ -202,6 +223,39 @@ class QwenVLGenerator:
             for image in reversed(owned_images):
                 image.close()
 
+    def generate_video_batch(self, prompts: list[str], video_lists: list[list[str]]) -> list[str]:
+        """每条：若干个视频 + 一段文字（单轮）。抽帧交给 qwen_vl_utils，参数取 self.video。"""
+        options = dict(self.video or {})
+        messages_batch = []
+        for prompt, videos in zip(prompts, video_lists):
+            if not isinstance(prompt, str):
+                raise ValueError("视频评估只支持单轮提示词")
+            content: list[dict[str, Any]] = [{"type": "video", "video": str(v), **options} for v in videos]
+            content.append({"type": "text", "text": prompt})
+            messages_batch.append([{"role": "user", "content": content}])
+        return self.generate_message_batch(messages_batch)
+
+    def _video_inputs(self, messages_batch: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        from qwen_vl_utils import process_vision_info
+
+        image_processor = getattr(self.processor, "image_processor", None)
+        patch = int(getattr(image_processor, "patch_size", 14) or 14)
+        # Qwen3-VL 的处理器要帧的时间戳（video_metadata），Qwen2/2.5-VL 的不认这个参数。
+        with_metadata = "qwen3" in type(self.processor).__name__.lower()
+        _, videos, video_kwargs = process_vision_info(
+            messages_batch, return_video_kwargs=True, return_video_metadata=with_metadata,
+            image_patch_size=patch,
+        )
+        if not videos:
+            return {}
+        extra: dict[str, Any] = dict(video_kwargs or {})
+        if with_metadata:
+            frames, metadata = zip(*videos)
+            extra.update(videos=list(frames), video_metadata=list(metadata), do_resize=False)
+        else:
+            extra["videos"] = list(videos)
+        return extra
+
     def generate_message_batch(
         self,
         messages_batch: list[list[dict[str, Any]]],
@@ -210,6 +264,11 @@ class QwenVLGenerator:
     ) -> list[str]:
         texts: list[str] = []
         input_images: list[Any] = []
+        has_video = any(
+            isinstance(part, Mapping) and part.get("type") == "video"
+            for messages in messages_batch for message in messages
+            for part in (message.get("content") if isinstance(message.get("content"), (list, tuple)) else ())
+        )
         for messages in messages_batch:
             template_kwargs: dict[str, Any] = {
                 "tokenize": False,
@@ -231,10 +290,17 @@ class QwenVLGenerator:
         inputs_kwargs: dict[str, Any] = {"text": texts, "padding": True, "return_tensors": "pt"}
         if input_images:
             inputs_kwargs["images"] = input_images
+        if has_video:
+            inputs_kwargs.update(self._video_inputs(messages_batch))
         inputs = self.processor(**inputs_kwargs)
         inputs = inputs.to(self.model.device)
+        generation_config = getattr(self, "_generation_config", None)
+        extra: dict[str, Any] = (
+            {"generation_config": generation_config} if generation_config is not None
+            else {"max_new_tokens": self.max_new_tokens}
+        )
         with self._torch.inference_mode():
-            generated = self.model.generate(**inputs, max_new_tokens=self.max_new_tokens)
+            generated = self.model.generate(**inputs, **extra)
         input_len = inputs["input_ids"].shape[1]
         generated_trimmed = generated[:, input_len:]
         decoded = self.processor.batch_decode(generated_trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)
@@ -328,7 +394,15 @@ def generate_predictions(
         batch = rows[start : start + batch_size]
         prompts = [_row_prompt(dataset_key, row, prompt_files, prompt_texts=prompt_snapshot) for row in batch]
         images = [_image_cell_or_none(row.get("image")) for row in batch]
-        if hasattr(generator, "generate_batch"):
+        videos = [_video_list(row.get("video_files")) for row in batch]
+        if any(videos):
+            # 视频行不能退回纯文本推理：那样模型没看视频也会答，分数照样出，错得看不出来。
+            if not hasattr(generator, "generate_video_batch"):
+                raise PredictionBatchError(f"{type(generator).__name__} 不支持视频输入")
+            if not all(videos):
+                raise PredictionBatchError("同一批里混了有视频和没视频的行")
+            batch_predictions = list(generator.generate_video_batch(prompts, videos))  # type: ignore[attr-defined]
+        elif hasattr(generator, "generate_batch"):
             batch_predictions = list(generator.generate_batch(prompts, images))  # type: ignore[attr-defined]
         else:
             batch_predictions = [generator.generate(prompt, image) for prompt, image in zip(prompts, images)]
@@ -369,12 +443,23 @@ def merge_indexed_predictions(chunks: Iterable[Iterable[tuple[int, str]]], total
 
 
 def count_missing_images(rows: list[Mapping[str, Any]]) -> tuple[int, list[str]]:
-    """Return (missing_count, sample_indices) for rows whose image cell is empty/NaN."""
+    """Return (missing_count, sample_indices) for rows with neither an image nor a video."""
     missing_indices = []
     for row in rows:
-        if _image_cell_or_none(row.get("image")) is None:
+        if _image_cell_or_none(row.get("image")) is None and not _video_list(row.get("video_files")):
             missing_indices.append(str(row.get("index", "")))
     return len(missing_indices), missing_indices[:10]
+
+
+def _video_list(value: Any) -> list[str]:
+    """``video_files`` 列（JSON 数组）→ 路径列表；空 / NaN → []。"""
+    if value is None or (isinstance(value, float) and value != value):
+        return []
+    text = str(value).strip()
+    if not text or text.lower() == "nan":
+        return []
+    items = json.loads(text) if text.startswith("[") else [text]
+    return [str(item) for item in items if str(item).strip()]
 
 
 def _image_cell_or_none(value: Any) -> str | None:

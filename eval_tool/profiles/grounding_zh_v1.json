@@ -124,6 +124,20 @@
         ]
       }
     },
+    "spatial_relation": {
+      "name": "eval_set_v1",
+      "kind": "spatial_relation",
+      "params": {
+        "select": [
+          {
+            "task_type": [
+              "spatial_relation"
+            ],
+            "turn": 1
+          }
+        ]
+      }
+    },
     "describe": {
       "name": "eval_set_v1",
       "kind": "describe",
@@ -221,6 +235,7 @@
     "inventory",
     "attribute_qa",
     "exist_negative",
+    "spatial_relation",
     "describe",
     "describe_modelhist",
     "reverse_consistency",
@@ -356,8 +371,7 @@
         ]
       ],
       "not_in_data": [
-        "ground_unique",
-        "spatial_relation"
+        "ground_unique"
       ]
     },
     "dataset_weights": {
@@ -368,6 +382,7 @@
       "attribute_qa": 0.05,
       "inventory": 0.0,
       "exist_negative": 0.0,
+      "spatial_relation": 0.0,
       "describe": 0.0,
       "describe_modelhist": 0.0,
       "reverse_consistency": 0.0,

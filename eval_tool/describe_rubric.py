@@ -62,8 +62,19 @@ def extract_json(content: str) -> dict[str, Any]:
     return json.loads(match.group(0))
 
 
+_FIELD = re.compile(r'"(correct|grounded|informative)"\s*:\s*(\d+(?:\.\d+)?)\s*[,}]')
+
+
 def parse_describe(content: str) -> DescribeVerdict:
-    data = extract_json(content)
+    try:
+        data = extract_json(content)
+    except ValueError:
+        # 判词写到一半被截断（裁判在 reason 里原地打转，把 max_tokens 用完了）：三个分数
+        # 往往已经完整写出来了，理由不全不影响打分。三个都在才收，缺一个照样报错。
+        fields = dict(_FIELD.findall(str(content or "")))
+        if not all(dim in fields for dim in DIMENSIONS):
+            raise
+        data = {**fields, "reason": "（判词被截断，理由不完整）"}
     scores: dict[str, int] = {}
     for dim in DIMENSIONS:
         if dim not in data:

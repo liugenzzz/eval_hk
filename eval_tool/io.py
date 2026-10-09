@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
@@ -131,3 +132,27 @@ def image_map_from_truth(truth: pd.DataFrame) -> dict[str, str]:
         for _, row in data.iterrows()
         if not pd.isna(row.get("image")) and str(row.get("image", "")).strip()
     }
+
+
+# xlsx (openpyxl) refuses ASCII control characters and raises IllegalCharacterError,
+# which kills the whole run at the write step - after all the inference is done. They
+# do reach us: generated book / journal text wrote LaTeX "\beta" into JSON unescaped,
+# so it decodes as a backspace, and a model can emit one just as well. Written as the
+# escape that produced them, so "$\beta$" still reads as LaTeX.
+_ILLEGAL_XLSX = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+_XLSX_ESCAPES = {"\x08": r"\b", "\x0c": r"\f", "\x0b": r"\v"}
+
+
+def _xlsx_text(value: Any) -> Any:
+    if not isinstance(value, str) or not _ILLEGAL_XLSX.search(value):
+        return value
+    return _ILLEGAL_XLSX.sub(lambda m: _XLSX_ESCAPES.get(m.group(0), "\\x%02x" % ord(m.group(0))), value)
+
+
+def excel_safe(frame: pd.DataFrame) -> pd.DataFrame:
+    """A copy of ``frame`` whose text cells openpyxl can write."""
+    out = frame.copy()
+    for column in out.columns:
+        if out[column].dtype == object or pd.api.types.is_string_dtype(out[column]):
+            out[column] = out[column].map(_xlsx_text)
+    return out

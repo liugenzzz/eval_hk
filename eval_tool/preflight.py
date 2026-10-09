@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -90,7 +92,8 @@ def preflight(config: PipelineConfig) -> Check:
         check.ok("image_root", "省略：使用 JSONL images；相对路径按 JSONL 所在目录解析")
     needs_class_table = any(config.dataset_kinds.get(key) in
                             {"object_ident", "inventory", "describe"} for key in mainline)
-    check.path("classes_yaml", seen.get("classes_yaml"), required=needs_class_table)
+    if check.path("classes_yaml", seen.get("classes_yaml"), required=needs_class_table):
+        _class_table_coverage(check, config, mainline, seen["classes_yaml"])
     check.path("labels_dir", seen.get("labels_dir"), required=False, directory=True)
     check.path("describe_prompt_dir", seen.get("describe_prompt_dir"), required=False, directory=True)
 
@@ -174,6 +177,14 @@ def preflight(config: PipelineConfig) -> Check:
     else:
         check.ok("单进程推理", f"device_map={config.infer.device_map}，batch_size={config.infer.batch_size}"
                               "（模型单卡放得下的话，配 gpu_ids 做数据并行快得多）")
+    # 提示词是推理第一步才读的：路径不对时模型都加载完了才报错，所以在这里先查。
+    prompts = sorted({Path(path) for key, path in config.infer.prompt_files.items()
+                      if key in config.enabled_datasets}, key=str)
+    missing = [path for path in prompts if not path.is_file()]
+    for path in missing:
+        check.bad("推理提示词", f"{path}  ← 找不到")
+    if prompts and not missing:
+        check.ok("推理提示词", ", ".join(str(path) for path in prompts))
 
     check.lines.append("")
     check.lines.append("[打分器]")
@@ -225,6 +236,77 @@ def _slice_sizes(check: Check, config: PipelineConfig, mainline: list[str]) -> N
             check.warn(key, f"{rows} 条  ← n < 30，报表上这一档不给百分比")
         else:
             check.ok(key, f"{rows} 条")
+    _unselected_task_types(check, config, mainline)
+
+
+def _class_table_coverage(check: Check, config: PipelineConfig, mainline: list[str], table_path: Any) -> None:
+    """类别表里有没有数据的 label。
+
+    文件在不等于表对：mbjc 的 label 是中文规范名（构建端 class_aliases 合并出来的），
+    input_full/classes.yaml 却是英文原表。配了英文表，物体识别拿金标答案去打都只有
+    35% 算对 —— 体检只看文件存在，一片绿。
+    """
+    from .classes import load_class_table
+
+    try:
+        names = set(load_class_table(table_path).id2name.values())
+    except Exception as exc:  # noqa: BLE001 - 表读不了就直接报出来
+        check.bad("classes_yaml", f"读不了：{type(exc).__name__}: {exc}")
+        return
+    labels: Counter[str] = Counter()
+    for name in sorted({config.datasets[key] for key in mainline}):
+        path = truth_path(config.tsv_dir, name)
+        if path.suffix != ".jsonl" or not path.is_file():
+            continue
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    label = (json.loads(line).get("metadata") or {}).get("label")
+                except (ValueError, AttributeError):
+                    continue
+                if label:
+                    labels[str(label).strip()] += 1
+    if not labels:
+        return
+    covered = sum(n for label, n in labels.items() if label in names) / sum(labels.values())
+    detail = f"数据里 {covered:.0%} 的 label 在表里"
+    if covered < 0.5:
+        check.bad("类别表覆盖", f"{detail} —— 多半配错了表（比如中文 label 配了英文原表）")
+    elif covered < 0.95:
+        missing = [label for label, _ in labels.most_common() if label not in names][:5]
+        check.warn("类别表覆盖", f"{detail}，缺的如 {missing}")
+    else:
+        check.ok("类别表覆盖", detail)
+
+
+def _unselected_task_types(check: Check, config: PipelineConfig, mainline: list[str]) -> None:
+    """评估集里有、但没有任何切片选中的 task_type。
+
+    切片按 task_type 选行，数据里多出一种任务时它不会报错，只是整批不进报表 ——
+    mbjc 的 698 条 spatial_relation 就是这样被跳过的，体检也是一片绿。
+    """
+    chosen: dict[str, set[Any]] = {}
+    for key in mainline:
+        name = config.datasets[key]
+        rules = (config.dataset_params.get(key) or {}).get("select") or [{}]
+        for rule in rules:
+            # 没写 task_type 的规则（或没写 select）选的是全部任务
+            chosen.setdefault(name, set()).update(rule.get("task_type") or [None])
+    for name, task_types in sorted(chosen.items()):
+        path = truth_path(config.tsv_dir, name)
+        if None in task_types or path.suffix != ".jsonl" or not path.is_file():
+            continue
+        counts: Counter[str] = Counter()
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    counts[str((json.loads(line).get("metadata") or {}).get("task_type"))] += 1
+                except (ValueError, AttributeError):
+                    continue
+        missed = sorted(((t, n) for t, n in counts.items() if t not in task_types), key=lambda x: -x[1])
+        if missed:
+            detail = "，".join(f"{t} {n} 条" for t, n in missed)
+            check.warn(f"{name} 里没有切片选中的任务", f"{detail}  ← 这些行不会进报表")
 
 
 def render(check: Check) -> str:

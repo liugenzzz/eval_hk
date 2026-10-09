@@ -640,6 +640,8 @@ def test_run_infer_passes_image_bounds_to_sequential_qwen_generator(
             "device_map": "auto",
             "image_min_pixels": 65_536,
             "image_max_pixels": 589_824,
+            "generation": {"do_sample": False},  # eval decodes greedily
+            "video": {"fps": 2.0, "max_frames": 32, "max_pixels": 200704},
         }
     ]
 
@@ -689,6 +691,8 @@ def test_run_infer_passes_image_bounds_through_parallel_worker(
             "device_map": "auto",
             "image_min_pixels": 65_536,
             "image_max_pixels": 589_824,
+            "generation": {"do_sample": False},  # eval decodes greedily
+            "video": {"fps": 2.0, "max_frames": 32, "max_pixels": 200704},
         }
     ]
 

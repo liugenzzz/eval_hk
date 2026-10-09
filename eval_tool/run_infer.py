@@ -29,7 +29,7 @@ from .infer_cache import (
     read_manifest,
     write_manifest,
 )
-from .io import load_truth_dataset
+from .io import excel_safe, load_truth_dataset
 
 
 class InferenceWorkerError(RuntimeError):
@@ -55,6 +55,8 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
                 device_map=config.device_map,
                 image_min_pixels=config.image_min_pixels,
                 image_max_pixels=config.image_max_pixels,
+                generation=config.generation,
+                video=config.video,
             )
         return local_generator
 
@@ -127,7 +129,7 @@ def run(config: InferConfig, generator: VLGenerator | None = None) -> dict[str, 
             )
         if not config.resume:
             output = build_prediction_frame(data, predictions)
-            output.to_excel(out_path, index=False)
+            excel_safe(output).to_excel(out_path, index=False)
         written[dataset_key] = out_path
     return written
 
@@ -183,6 +185,9 @@ def _run_dataset_resumable_unlocked(
         rows,
         image_min_pixels=config.image_min_pixels,
         image_max_pixels=config.image_max_pixels,
+        generation=config.generation,
+        # 只有带视频的数据集才把抽帧参数写进指纹，图片数据集的指纹不受影响
+        video=config.video if any(row.get("video_files") for row in rows) else None,
     )
     store = InferShardStore(config.out_dir / "_partial", dataset_key, fingerprint)
     manifest_path = out_path.with_suffix(".infer.json")
@@ -326,7 +331,7 @@ def _validate_cached_indexes(
 def _write_prediction_xlsx_atomic(output, out_path: Path) -> None:
     temporary = out_path.with_name(f".{out_path.stem}.tmp{out_path.suffix}")
     try:
-        output.to_excel(temporary, index=False)
+        excel_safe(output).to_excel(temporary, index=False)
         temporary.replace(out_path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -397,6 +402,8 @@ def _run_dataset_parallel_resumable(
                 store.fingerprint,
                 config.image_min_pixels,
                 config.image_max_pixels,
+                config.generation,
+                config.video,
             ): worker_id
             for worker_id, (gpu_id, chunk) in enumerate(zip(worker_gpus, chunks))
             if chunk
@@ -434,6 +441,8 @@ def _infer_worker_resumable(
     fingerprint: str,
     image_min_pixels: int | None = None,
     image_max_pixels: int | None = None,
+    generation: dict[str, Any] | None = None,
+    video: dict[str, Any] | None = None,
 ) -> int:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     generator = QwenVLGenerator(
@@ -443,6 +452,8 @@ def _infer_worker_resumable(
         device_map="auto",
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
+        generation=generation,
+        video=video,
     )
     rows = [row for _, row in indexed_rows]
     store = InferShardStore(partial_dir, dataset_key, fingerprint)
@@ -489,6 +500,8 @@ def _run_dataset_parallel(config: InferConfig, dataset_key: str, rows: list[Mapp
                     config.torch_dtype,
                     config.image_min_pixels,
                     config.image_max_pixels,
+                    config.generation,
+                    config.video,
                 )
             )
         iterator = as_completed(futures)
@@ -510,6 +523,8 @@ def _infer_worker(
     torch_dtype: str,
     image_min_pixels: int | None = None,
     image_max_pixels: int | None = None,
+    generation: dict[str, Any] | None = None,
+    video: dict[str, Any] | None = None,
 ) -> list[tuple[int, str]]:
     os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     generator = QwenVLGenerator(
@@ -519,6 +534,8 @@ def _infer_worker(
         device_map="auto",
         image_min_pixels=image_min_pixels,
         image_max_pixels=image_max_pixels,
+        generation=generation,
+        video=video,
     )
     indices = [idx for idx, _ in indexed_rows]
     rows = [row for _, row in indexed_rows]
