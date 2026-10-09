@@ -9,6 +9,8 @@ Templated prompts and short answers collide across different images, so for the 
 det, industrial) only media hits mean leakage; for book / journal the text hits do.
 
   python leak_check.py --train <export dir or jsonl files> [--out /tmp/leak_check]
+Eval sets are named like the training data (aircraft_defect, video_park_abnormal, detection, ...); the name
+registered in field.eval_holdout is shown next to it.
 2026-10-09 on the 32B training files (train_data/*.jsonl): book 1200/1200 answers verbatim, journal
 828/829, park all 180 clips, aircraft 1713/1984 images md5-identical; det and industrial clean.
 """
@@ -24,14 +26,16 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 
 R = "/mnt/si003010kcx0/mmdata/eval_runs"
+# display name (same vocabulary as the training data) -> (eval_set registered in field.eval_holdout, eval file)
 EVALS = {
-    "aircraft_v2": "/mnt/si003010kcx0/mmdata/mmcode/eval_hk/data/aircraft_vqa/aircraft_eval_v2.jsonl",
-    "book": f"{R}/book/data/book_vqa.jsonl",
-    "journal": f"{R}/journal/data/journal_vqa.jsonl",
-    "park": f"{R}/park/data/park_video.jsonl",
-    "det": f"{R}/det/data/mbjc_test_v1.jsonl",
-    "industrial": f"{R}/industrial/data/industrial_eval.jsonl",
-    "journal_gi82": f"{R}/journal_gi82/data/journal_gi82_vqa.jsonl",
+    "book": ("book_eval_v1", f"{R}/book/data/book_vqa.jsonl"),
+    "journal": ("journal_eval_v1", f"{R}/journal/data/journal_vqa.jsonl"),
+    "journal_gi82": ("journal_gi82_eval_v1", f"{R}/journal_gi82/data/journal_gi82_vqa.jsonl"),
+    "video_park_abnormal": ("park_video_v1", f"{R}/park/data/park_video.jsonl"),
+    "detection": ("mbjc_test_v1", f"{R}/det/data/mbjc_test_v1.jsonl"),
+    "industrial": ("industrial_eval_v1", f"{R}/industrial/data/industrial_eval.jsonl"),
+    "aircraft_defect": ("aircraft_eval_v2",
+                        "/mnt/si003010kcx0/mmdata/mmcode/eval_hk/data/aircraft_vqa/aircraft_eval_v2.jsonl"),
 }
 PARK_BATCH = "video_abnormal_behavior_v1"
 MIN_TEXT = 30
@@ -84,7 +88,7 @@ def eval_db_id(name, rec):
     if m:
         return f"{m.group(1)}:{m.group(2)}"
     meta = parse_maybe(rec.get("metadata")) or {}
-    if name == "park" and isinstance(meta, dict) and meta.get("corpus_id"):
+    if name == "video_park_abnormal" and isinstance(meta, dict) and meta.get("corpus_id"):
         return f"{PARK_BATCH}:{meta['corpus_id']}"
     return None
 
@@ -105,14 +109,15 @@ def main():
     files = []
     for t in a.train:
         if os.path.isdir(t):  # an export dir: every qa / vqa file (pt has no QA pairs to match)
-            files += sorted(glob.glob(os.path.join(t, "*", "qa", "*.jsonl")) + glob.glob(os.path.join(t, "*", "vqa", "*.jsonl")))
+            files += sorted(glob.glob(os.path.join(t, "**", "qa", "*.jsonl"), recursive=True)
+                            + glob.glob(os.path.join(t, "**", "vqa", "*.jsonl"), recursive=True))
         else:
             files.append(t)
     os.makedirs(a.out, exist_ok=True)
 
     akey, ukey, pkey, bkey, idkey = {}, {}, {}, {}, {}
     n_items = collections.Counter()
-    for name, path in EVALS.items():
+    for name, (_, path) in EVALS.items():
         with open(path, encoding="utf-8") as f:
             for i, line in enumerate(f):
                 rec = json.loads(line)
@@ -174,13 +179,14 @@ def main():
             md5_hit[name].add(iid)
 
     print(f"\ntraining files {len(files)}, rows {rows:,}")
-    print(f"{'eval set':12s} {'items':>6s} {'answer':>7s} {'prompt':>7s} {'path':>6s} {'md5':>6s} {'db id':>6s}")
+    print(f"{'eval set (registered as)':44s} {'items':>6s} {'answer':>7s} {'prompt':>7s} {'path':>6s} {'md5':>6s} {'db id':>6s}")
     summary = {}
     for name in EVALS:
-        row = {"items": n_items[name], "answer_text": len(hit["assistant"][name]), "prompt_text": len(hit["user"][name]),
+        row = {"eval_set": EVALS[name][0], "items": n_items[name], "answer_text": len(hit["assistant"][name]),
+               "prompt_text": len(hit["user"][name]),
                "media_path": len(hit["path"][name]), "media_md5": len(md5_hit[name]), "db_id": len(hit["id"][name])}
         summary[name] = row
-        print(f"{name:12s} {row['items']:6d} {row['answer_text']:7d} {row['prompt_text']:7d} {row['media_path']:6d} "
+        print(f"{name + ' (' + row['eval_set'] + ')':44s} {row['items']:6d} {row['answer_text']:7d} {row['prompt_text']:7d} {row['media_path']:6d} "
               f"{row['media_md5']:6d} {row['db_id']:6d}")
     with open(os.path.join(a.out, "summary.json"), "w", encoding="utf-8") as f:
         json.dump({"files": files, "rows": rows, "summary": summary,

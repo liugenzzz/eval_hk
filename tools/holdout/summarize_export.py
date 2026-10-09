@@ -17,8 +17,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_train_data import SOURCE_NAMES  # noqa: E402
 
 ORDER = ["book", "journal", "video", "detection", "industrial"]
-TYPE_NAMES = {"book": "书籍", "journal": "期刊", "video": "视频", "detection": "目标检测", "industrial": "工业质检"}
+TYPE_NAMES = {"book": "书籍", "journal": "期刊", "video": "视频", "detection": "目标检测", "industrial": "工业"}
 TOOLS = "/mnt/si003010kcx0/mmdata/mmcode/eval_hk/tools/holdout"
+# leak_check.py summaries written before 2026-10-09 used short keys
+OLD_EVAL_KEYS = {"aircraft_v2": ("aircraft_defect", "aircraft_eval_v2"), "park": ("video_park_abnormal", "park_video_v1"),
+                 "det": ("detection", "mbjc_test_v1"), "industrial": ("industrial", "industrial_eval_v1"),
+                 "book": ("book", "book_eval_v1"), "journal": ("journal", "journal_eval_v1"),
+                 "journal_gi82": ("journal_gi82", "journal_gi82_eval_v1")}
 SOURCE_LABELS = {"video_bilibili": "B站视频", "video_park_abnormal": "园区异常行为视频", "aircraft_defect": "飞机缺陷问答"}
 
 
@@ -52,14 +57,17 @@ def main():
           f"- 生成和更新工具：`{TOOLS}/`（git 仓库 eval_hk 内，说明见同目录 README.md）", ""]
 
     L += ["## 怎么用", "",
-          "- **后续要训练数据，直接从这里抽**：按「类型 / pt·qa·vqa / 来源」挑文件，或者从文件里抽子集，不用再查库。",
-          "- 目录两级：第一级是语料类型，第二级是 pt / qa / vqa。",
-          "  - pt 是预训练纯文本，同一类型合成一个文件：`<类型>/pt/<类型>.pt.jsonl`，每行 `{\"id\", \"text\"}`；",
-          "  - qa 是纯文本问答，vqa 是带图或视频的问答，都按来源分文件：`<类型>/<qa|vqa>/<来源批次>.<格式>.jsonl`。",
-          "- 格式：`sharegpt` 用 `conversations`，`openai` 用 `messages`，`alpaca` 用 `instruction / input / output`。"
-          "带图的行有 `images`，带视频的行有 `videos`，里面都是绝对路径。",
-          "- 每行第一个字段是 `\"id\": \"<来源批次>:<库 id>\"`，可以回库里查原始样本；pt 合成一个文件后也能靠它分出来源。",
-          "- 文件名用好认的来源名。和库里批次名不一样的有这几个（行内 id 仍是库里的批次名）：",
+          "- **后续要训练数据，直接从这里抽**：按语料类型、领域和 pt / qa / vqa 挑任务文件，或者从文件里抽子集，不用再查库。",
+          "- 书籍：`book/<七大类>/<pt|qa|vqa>/<任务类型>.jsonl`；没有七大类标签的放进 `book/其他/<304|航空书籍|军事武器|GI82书籍|未分类>/`。同一领域、同一任务的不同来源合成一个文件。",
+          "- CPT 按领域放进 `pt/books_combined.jsonl`，沿用原名，不再细分。",
+          "- 期刊：`journal/<pt|qa|vqa>/<任务类型>.jsonl`，两批来源合并为 11 种任务。",
+          "- 视频：`video/vqa/` 下保留 B站 3 个任务；园区合成 `park_caption.jsonl`、`park_multiple_choice_qa.jsonl`、`park_open_ended_qa.jsonl`。",
+          "- 检测：`detection/vqa/` 按通用目标、GQA场景、航拍、遥感四种场景各一个文件。",
+          "- 工业：`industrial/飞机缺陷/vqa/<任务类型>.jsonl`（16 种任务）；`industrial/工业质检/vqa/defect_cn.jsonl` 和 `defect_en.jsonl`（part0 / part1 按语言合并）。",
+          "- 格式：pt 每行含 `id` 和 `text`；qa / vqa 统一为 sharegpt 的 `conversations`。vqa 带 `images` 或 `videos`，媒体为绝对路径；没有媒体的样本写空列表，保证字段一致。",
+          "- pt / qa / vqa 按库里 `task_kind_map` 定；带图或视频的行一律进 vqa。",
+          '- 每行第一个字段是 `"id": "<来源批次>:<库 id>"`，可回库追溯；合并文件仍能靠 id 分出来源。',
+          "- 来源显示名对照如下（文件名按任务命名，行内 id 和 manifest 仍是库里的批次名）：",
           *[f"  - `{v}` = 库里 `{k}`（{SOURCE_LABELS.get(v, '')}）" for k, v in SOURCE_NAMES.items()],
           "- 评估集**不在这里**：文件在 `eval_runs/<评估集>/data/`（飞机的在 `eval_hk/data/aircraft_vqa/`），"
           "登记在库表 `field.eval_holdout`。导出时已按登记排除，文末的泄漏检查可以确认。", ""]
@@ -72,10 +80,11 @@ def main():
           "2. **再改本地**：只重导受影响的批次，然后拼回本目录：",
           "   ```bash",
           f"   PY=/mnt/si003010kcx0/mmdata/mm_env/mysql/bin/python",
-          f"   $PY {TOOLS}/export_train_data.py --out /tmp/field_redo --only <批次1,批次2> --workers 8",
-          f"   $PY {TOOLS}/splice_export.py {out} /tmp/field_redo",
+          '   REDO=$(mktemp -d /tmp/field_redo.XXXXXX)',
+          f'   $PY {TOOLS}/export_train_data.py --out "$REDO" --only <批次1,批次2> --workers 8',
+          f'   $PY {TOOLS}/splice_export.py {out} "$REDO"',
           "   ```",
-          "   要整体重建时，先导到新目录，校验通过后再替换本目录。整体重建用 8 个进程约 30 分钟。",
+          "   要整体重建时，先导到新目录，校验通过后再替换本目录。耗时以本次日志为准；长任务放 tmux / nohup 中后台运行，日志写文件，避免 SSH 断线中止。",
           "3. **检查**：两项都通过才算更新完成。",
           "   ```bash",
           f"   $PY {TOOLS}/verify_export.py {out}",
@@ -100,13 +109,40 @@ def main():
         for i, v in enumerate(row + [sum(row), nf, size]):
             tot[i] += v
     L.append(f"| **合计** | {tot[0]:,} | {tot[1]:,} | {tot[2]:,} | {tot[3]:,} | {tot[4]} | {gb(tot[5])} |")
-    L += ["", "qa 和 vqa 按这一行带不带图或视频来分。对期刊来说，这和库里 `task_kind_map` 的任务标签完全一致。", ""]
+    L += ["", "pt / qa / vqa 按库里 `task_kind_map` 定；带图或视频的行一律进 vqa。", ""]
 
-    L += ["## 文件明细", "", "| 文件 | 格式 | 行数 | GB | 来源批次 |", "|---|---|---|---|---|"]
+    # Domain metadata is recorded by v3; the path fallback also handles older manifests.
+    for corpus, label in (("book", "书籍领域"), ("industrial", "工业子领域")):
+        grouped = collections.defaultdict(lambda: [0, 0, 0, 0, 0])
+        for name, e in files.items():
+            if e["corpus_type"] != corpus:
+                continue
+            domain = e.get("domain", "/".join(name.split("/")[1:-2])) or "未分类"
+            values = grouped[domain]
+            values[("pt", "qa", "vqa").index(e["kind"])] += e["rows"]
+            values[3] += 1
+            values[4] += e["bytes"]
+        if grouped:
+            L += [f"### {label}", "", "| 领域 | pt 行数 | qa 行数 | vqa 行数 | 合计行数 | 文件数 | 体积 GB |",
+                  "|---|---|---|---|---|---|---|"]
+            preferred = ["共性基础", "研发设计", "生产制造", "试验测试", "维修保障", "运营管理", "作战应用",
+                         "飞机缺陷", "工业质检"]
+            for domain, values in sorted(grouped.items(), key=lambda item: (
+                    preferred.index(item[0]) if item[0] in preferred else len(preferred), item[0])):
+                pt, qa, vqa, count, size = values
+                L.append(f"| {domain} | {pt:,} | {qa:,} | {vqa:,} | {pt + qa + vqa:,} | {count} | {gb(size)} |")
+            L.append("")
+
+    L += ["## 文件明细", ""]
+    by_directory = collections.defaultdict(list)
     for name, e in files.items():
-        src = ", ".join(e["batches"]) if len(e["batches"]) <= 3 else f"{len(e['batches'])} 个批次"
-        L.append(f"| `{name}` | {e['format']} | {e['rows']:,} | {gb(e['bytes'])} | {src} |")
-    L.append("")
+        by_directory[name.rsplit("/", 1)[0]].append((name, e))
+    for directory in sorted(by_directory, key=lambda d: (type_key(d.split("/")[0]), d)):
+        L += [f"### `{directory}/`", "", "| 文件 | 格式 | 行数 | GB | 来源批次 |", "|---|---|---|---|---|"]
+        for name, e in sorted(by_directory[directory]):
+            src = ", ".join(e["batches"]) if len(e["batches"]) <= 3 else f"{len(e['batches'])} 个批次"
+            L.append(f"| `{name}` | {e['format']} | {e['rows']:,} | {gb(e['bytes'])} | {src} |")
+        L.append("")
 
     L += ["## 每个来源的对账", "",
           "| 类型 | 来源批次 | 库里行数 | 写出 | 评估留出 | 剔除（副本） | 拒收 |", "|---|---|---|---|---|---|---|"]
@@ -124,12 +160,15 @@ def main():
     if a.leak and os.path.exists(a.leak):
         s = json.load(open(a.leak, encoding="utf-8"))["summary"]
         L += ["## 泄漏检查（评估集 vs 本目录的 qa / vqa 文件）", "",
-              "| 评估集 | 条数 | 答案原文命中 | 题面命中 | 媒体路径命中 | 媒体 md5 命中 | 库 id 命中 |", "|---|---|---|---|---|---|---|"]
+              "| 评估集（库里登记名） | 条数 | 答案原文命中 | 题面命中 | 媒体路径命中 | 媒体 md5 命中 | 库 id 命中 |",
+              "|---|---|---|---|---|---|---|"]
         for k, v in s.items():
-            L.append(f"| {k} | {v['items']:,} | {v['answer_text']} | {v['prompt_text']} | {v['media_path']} | "
+            name, reg = (k, v["eval_set"]) if "eval_set" in v else OLD_EVAL_KEYS.get(k, (k, ""))
+            L.append(f"| {name}（{reg}） | {v['items']:,} | {v['answer_text']} | {v['prompt_text']} | {v['media_path']} | "
                      f"{v['media_md5']} | {v['db_id']} |")
         L += ["", "后三列为 0，说明评估集的图、视频和样本都没有进本目录。"
-              "飞机、园区、检测、工业这几类的文本命中，是同一句模板化问法或答案用在了别的图片或视频上，不算泄漏。", ""]
+              "aircraft_defect、video_park_abnormal、detection、industrial 这几个的文本命中，"
+              "是同一句模板化问法或答案用在了别的图片或视频上，不算泄漏。", ""]
 
     L += ["## 更新记录", "", "| 时间 | 内容 | 耗时 |", "|---|---|---|",
           f"| {man['created']} | 全量导出：{len(batches)} 个来源批次（含 GI82，去掉其中 20 期评估留出）"

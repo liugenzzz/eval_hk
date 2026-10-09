@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import pymysql
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from export_train_data import SOURCE_NAMES  # noqa: E402
 from fielddb import connect  # noqa: E402
 
 R = "/mnt/si003010kcx0/mmdata/eval_runs"
@@ -32,6 +33,12 @@ EVAL_SETS = {
     "mbjc_test_v1": f"{R}/det/data/mbjc_test_v1.jsonl",
     "journal_gi82_eval_v1": f"{R}/journal_gi82/data/journal_gi82_vqa.jsonl",
 }
+
+
+# readable names for the summary only; the TSV keeps the registered eval_set (register_eval_sets.py --copies uses it)
+DISPLAY = {"aircraft_eval_v2": "aircraft_defect", "park_video_v1": "video_park_abnormal", "mbjc_test_v1": "detection",
+           "industrial_eval_v1": "industrial", "book_eval_v1": "book", "journal_eval_v1": "journal",
+           "journal_gi82_eval_v1": "journal_gi82"}
 
 
 def eval_media(path):
@@ -97,7 +104,8 @@ def main():
     hits = sorted({pr for pr in pairs if hashes.get(pr[2]) and hashes.get(pr[2]) == hashes.get(pr[4])})
     stats = collections.Counter((h[0], h[3], "same path" if h[2] == h[4] else "copy") for h in hits)
     for k, n in sorted(stats.items()):
-        print(f"{k[0]:20s} {k[1]:28s} {k[2]:9s} {n:6d}", file=sys.stderr)
+        name = f"{DISPLAY.get(k[0], k[0])} ({k[0]})"
+        print(f"{name:44s} {SOURCE_NAMES.get(k[1], k[1]):28s} {k[2]:9s} {n:6d}", file=sys.stderr)
     print(f"candidate pairs {len(pairs):,}, identical {len(hits):,}", file=sys.stderr)
     for h in hits:
         print("\t".join(h))

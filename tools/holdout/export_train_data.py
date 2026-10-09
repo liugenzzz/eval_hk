@@ -1,38 +1,35 @@
-"""Export the field DB as LlamaFactory training files, organised by corpus type and pt / qa / vqa, with
-every eval hold-out left out.
-
-What goes out
-  corpus_samples         every batch except --exclude (regexes on batch_tag; none by default)
-  defect_tetect_samples  defect_part0_v1 / defect_part1_v1
-Left out
-  rows with is_holdout=1 (the eval sets registered in eval_holdout), and rows using any media path listed
-  in --exclude-media (one absolute path per line; a safety net for eval copies not flagged in the DB).
+"""Export the field DB as training files, one file per task type, with every eval hold-out left out.
 
 Layout (--out)
-  <corpus_type>/pt/<corpus_type>.pt.jsonl    {"id", "text"}: all pretraining text of that corpus type in one
-                                             file (data_format pt, plus the question-less pipeline_export
-                                             rows of aircraft_book_v1)
-  <corpus_type>/qa/<source>.<format>.jsonl   text-only QA                 format: sharegpt | openai | alpaca
-  <corpus_type>/vqa/<source>.<format>.jsonl  QA with images or videos
-  (<source> is the batch_tag, or its readable name from SOURCE_NAMES, e.g. aircraft_vqa_v1 -> aircraft_defect)
-  (a .image / .video / .mixed suffix appears only if one batch+format holds both images and videos)
-  dataset_info.json                          only with --dataset-info: LlamaFactory registration of every file
-  manifest.json                              per file: rows, bytes, format, modality, batches; per batch: rows in the
-                                             DB, written per file, skipped per reason
-  _rejects/<batch>.jsonl                     {"id", "data_format", "task_type", "reason"} of every row not written
-qa / vqa is decided per row by whether it carries media, not by task_kind_map, so that every file has one
-column set (datasets raises CastError otherwise) and vqa never contains a row without its image.
+  book/<领域>/<pt|qa|vqa>/<task_type>.jsonl        领域 = domain_name of the 七大类 (domain_code 01-07)
+  book/其他/<标签>/<pt|qa|vqa>/<task_type>.jsonl   books without a 七大类 label: the domain_code when it is a real
+                                                    one (304), else the source (航空书籍 / 军事武器 / GI82书籍), and
+                                                    未分类 for CPT chunks the classifier left unlabelled
+  <journal|video|detection>/<pt|qa|vqa>/<task_type>.jsonl
+  industrial/<飞机缺陷|工业质检>/vqa/<task_type>.jsonl
+  exceptions (user, 2026-10-09): park video's 24 LLaVA-Video subsets merge into park_caption /
+  park_multiple_choice_qa / park_open_ended_qa; detection goes one file per scene category (domain_name);
+  defect_tetect has no task type: industrial/工业质检/vqa/defect_cn.jsonl / defect_en.jsonl (language column)
+  manifest.json                                    per file: rows, bytes, kind, task, batches; per batch: rows in the DB,
+                                                    written, held out, excluded, rejected
+  _rejects/<batch>.jsonl                           {"id", "data_format", "task_type", "reason"} of every row not written
+  dataset_info.json                                only with --dataset-info
+Rows of one task type are merged across sources, so everything except pt is converted to sharegpt:
+  pt   {"id", "text"}
+  else {"id", "conversations", "images" | "videos"}   openai roles user/assistant -> human/gpt; alpaca
+       instruction (+ "\n" + input) -> human, output -> gpt; pipeline_export via train_conversations
+pt / qa / vqa follows task_kind_map; a row carrying media always goes to vqa. Every vqa row carries its media key
+("videos" under video/, "images" elsewhere; an empty list when the row has none), so a file has one column set.
+A row with both images and videos, or a media type foreign to its corpus type, gets a .mixed / .image / .video
+suffix (ZeRO-3 deadlocks when one micro-batch mixes images and videos).
 
-Every training row starts with "id": "<batch>:<db id>", the key the eval sets use, so a later leak
-check is an id lookup. Media paths are the absolute new_path from corpus_media / defect_tetect_media in
-media_idx order. Rows are checked with the rules LlamaFactory enforces (as in the 9-30 cleaning,
-clean_invalid_rows.py). When a row has media but no placeholder at all, one <image>/<video> per item is
-prepended to the first user turn (the 9-30 repair did this for 5,392 alpaca rows); any other
-placeholder/media mismatch is rejected. A row with both images and videos goes to its own .mixed file
-(ZeRO-3 deadlocks when one micro-batch mixes them).
+Every row starts with "id": "<batch_tag>:<db id>" (the key the eval sets use). Media paths are the absolute
+new_path from corpus_media / defect_tetect_media in media_idx order. Rows are checked with the rules LlamaFactory
+enforces (clean_invalid_rows.py); a row with media but no placeholder at all gets one <image>/<video> per item
+prepended to the first user turn; any other placeholder/media mismatch is rejected.
 
   python export_train_data.py --out DIR --bench              # time one chunk of every batch, then estimate
-  python export_train_data.py --out DIR --workers 4          # full export
+  python export_train_data.py --out DIR --workers 8          # full export
 """
 import argparse
 import collections
@@ -50,20 +47,21 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from fielddb import connect  # noqa: E402
 
 CHUNK = 20000
-# File names use these readable source names; ids and the manifest keep the DB batch_tag, so every row
-# still maps back to the DB.
+# Readable names of sources, used in docs and summaries; row ids and the manifest keep the DB batch_tag.
 SOURCE_NAMES = {
     "video_v1": "video_bilibili",                         # B站视频
     "video_abnormal_behavior_v1": "video_park_abnormal",  # 园区异常行为
     "aircraft_vqa_v1": "aircraft_defect",                 # 飞机缺陷问答
 }
+SEVEN = {"01", "02", "03", "04", "05", "06", "07"}         # 七大类 domain codes (names from domain_name)
+BOOK_OTHER = {"aircraft_book_v1": "航空书籍", "weapon_book_v1": "军事武器", "book_gi82_v1": "GI82书籍"}
+KINDS = ("pt", "qa", "vqa")
 SHAREGPT_TAGS = {"role_tag": "from", "content_tag": "value", "user_tag": "human",
                  "assistant_tag": "gpt", "system_tag": "system"}
-OPENAI_TAGS = {"role_tag": "role", "content_tag": "content", "user_tag": "user",
-               "assistant_tag": "assistant", "system_tag": "system"}
+ROLE = {"user": "human", "assistant": "gpt", "system": "system"}
 TABLES = {
     # pipeline_export rows (aircraft_book_v1) are ~10x larger than what is used: fetch only those fields
-    "corpus_samples": ("""SELECT id, data_format, task_type, is_holdout, media_count,
+    "corpus_samples": ("""SELECT id, data_format, task_type, is_holdout, media_count, domain_code, domain_name,
                                  IF(is_holdout = 1 OR data_format = 'pt', NULL,
                                     IF(data_format = 'pipeline_export',
                                        JSON_OBJECT('images', content->'$.images', 'question', content->'$.question',
@@ -73,13 +71,14 @@ TABLES = {
                                  IF(is_holdout = 0 AND data_format = 'pipeline_export', train_conversations, NULL)
                             FROM corpus_samples WHERE batch_tag = %s AND id BETWEEN %s AND %s ORDER BY id""",
                        "corpus_media"),
-    "defect_tetect_samples": ("""SELECT id, data_format, NULL, is_holdout, NULL, IF(is_holdout = 1, NULL, content),
-                                        NULL, NULL
+    # defect_tetect has no task type: its language (generated column cn / en) names the file, part0 and part1 merged
+    "defect_tetect_samples": ("""SELECT id, data_format, CONCAT('defect_', language), is_holdout, NULL, domain_code, domain_name,
+                                        IF(is_holdout = 1, NULL, content), NULL, NULL
                                    FROM defect_tetect_samples WHERE batch_tag = %s AND id BETWEEN %s AND %s
                                   ORDER BY id""", "defect_tetect_media"),
 }
 
-G = {}  # per-worker state: db connection, args
+G = {}  # per-worker state: db connection, args, task kinds
 
 
 # ---------------------------------------------------------------- row checks (LlamaFactory rules)
@@ -143,8 +142,31 @@ def declared_media(c, images, videos):
             raise ValueError(f"媒体行缺失（{key} {len(have)}/{len(want)}）")
 
 
+def to_sharegpt(fmt, c, tconv):
+    """Conversation turns of a non-pt row as sharegpt [{from, value}]."""
+    if fmt == "sharegpt":
+        return c.get("conversations")
+    if fmt == "pipeline_export":
+        return json.loads(tconv)
+    if fmt == "openai_messages":
+        msgs = c.get("messages")
+        why = check_openai(msgs)
+        if why:
+            raise ValueError(why)
+        return [{"from": ROLE.get(m["role"], m["role"]), "value": m["content"]} for m in msgs]
+    if fmt == "alpaca":
+        ins, inp, out = (c.get("instruction") or ""), (c.get("input") or ""), (c.get("output") or "")
+        if not str(ins).strip():
+            raise ValueError("instruction 为空")
+        if not str(out).strip():
+            raise ValueError("output 为空")
+        return [{"from": "human", "value": ins + ("\n" + inp if str(inp).strip() else "")},
+                {"from": "gpt", "value": out}]
+    raise ValueError(f"未知 data_format {fmt}")
+
+
 def convert(fmt, content, text, tconv, images, videos):
-    """-> (out_format, record, repaired) or raises ValueError(reason)."""
+    """-> ("pt" | "sft", record, repaired) or raises ValueError(reason)."""
     if fmt == "pt":
         if not text or not text.strip():
             raise ValueError("pt 文本为空")
@@ -153,55 +175,55 @@ def convert(fmt, content, text, tconv, images, videos):
         return "pt", {"text": text}, False
     c = json.loads(content)
     declared_media(c, images, videos)
-    if fmt in ("sharegpt", "pipeline_export"):
-        if fmt == "pipeline_export":
-            if tconv is None:
-                # question "" and the body in answer/text: pretraining text, like domain_knowledge_corpus
-                # elsewhere (fix_empty_conversations.py cleared their train_conversations on purpose)
-                body = c.get("text") or c.get("answer")
-                if not str(c.get("question") or "").strip() and isinstance(body, str) and body.strip():
-                    if images or videos:
-                        raise ValueError("无问题的语料行带媒体")
-                    return "pt", {"text": body}, False
-                raise ValueError("pipeline_export 无 train_conversations")
-            conv = json.loads(tconv)
-        else:
-            conv = c.get("conversations")
-        why = check_sharegpt(conv)
-        if why:
-            raise ValueError(why)
-        conv = [dict(m) for m in conv]
-        first = next(i for i, m in enumerate(conv) if m["from"] == "human")
-        texts, repaired, why = fix_placeholders([m["value"] for m in conv], first, images, videos)
-        if why:
-            raise ValueError(why)
-        for m, t in zip(conv, texts):
-            m["value"] = t
-        return "sharegpt", {"conversations": conv}, repaired
-    if fmt == "openai_messages":
-        msgs = c.get("messages")
-        why = check_openai(msgs)
-        if why:
-            raise ValueError(why)
-        msgs = [dict(m) for m in msgs]
-        first = next(i for i, m in enumerate(msgs) if m["role"] == "user")
-        texts, repaired, why = fix_placeholders([m["content"] for m in msgs], first, images, videos)
-        if why:
-            raise ValueError(why)
-        for m, t in zip(msgs, texts):
-            m["content"] = t
-        return "openai", {"messages": msgs}, repaired
-    if fmt == "alpaca":
-        ins, inp, out = (c.get("instruction") or ""), (c.get("input") or ""), (c.get("output") or "")
-        if not str(ins).strip():
-            raise ValueError("instruction 为空")
-        if not str(out).strip():
-            raise ValueError("output 为空")
-        texts, repaired, why = fix_placeholders([ins, inp, out], 0, images, videos)
-        if why:
-            raise ValueError(why)
-        return "alpaca", {"instruction": texts[0], "input": texts[1], "output": texts[2]}, repaired
-    raise ValueError(f"未知 data_format {fmt}")
+    if fmt == "pipeline_export" and tconv is None:
+        # question "" and the body in answer/text: pretraining text, like domain_knowledge_corpus elsewhere
+        # (fix_empty_conversations.py cleared their train_conversations on purpose)
+        body = c.get("text") or c.get("answer")
+        if not str(c.get("question") or "").strip() and isinstance(body, str) and body.strip():
+            if images or videos:
+                raise ValueError("无问题的语料行带媒体")
+            return "pt", {"text": body}, False
+        raise ValueError("pipeline_export 无 train_conversations")
+    conv = to_sharegpt(fmt, c, tconv)
+    why = check_sharegpt(conv)
+    if why:
+        raise ValueError(why)
+    conv = [{"from": m["from"], "value": m["value"]} for m in conv]
+    first = next(i for i, m in enumerate(conv) if m["from"] == "human")
+    texts, repaired, why = fix_placeholders([m["value"] for m in conv], first, images, videos)
+    if why:
+        raise ValueError(why)
+    for m, t in zip(conv, texts):
+        m["value"] = t
+    return "sft", {"conversations": conv}, repaired
+
+
+PARK_KINDS = ("caption", "multiple_choice_qa", "open_ended_qa")
+
+
+def task_file(ctype, batch, task, dname):
+    """File name (without .jsonl) a row goes to; the task type unless the user asked otherwise (2026-10-09)."""
+    if batch == "video_abnormal_behavior_v1":         # 24 LLaVA-Video subsets (duration x source x kind) -> 3 kinds
+        for k in PARK_KINDS:
+            if task.endswith(k):
+                return f"park_{k}"
+    if ctype == "detection" and dname:                 # by scene category: 通用目标 / GQA场景 / 航拍 / 遥感
+        return dname
+    return task or batch
+
+
+def location(ctype, batch, dcode, dname):
+    """Directory under the export root before <pt|qa|vqa>: book by 七大类 domain, industrial by
+    飞机缺陷 / 工业质检, the rest flat."""
+    if ctype == "industrial" and dname:
+        return f"industrial/{dname}"
+    if ctype != "book":
+        return ctype
+    if dcode in SEVEN and dname:
+        return f"book/{dname}"
+    if dcode and dcode != "unknown":
+        return f"book/其他/{dcode}"
+    return f"book/其他/{BOOK_OTHER.get(batch, '未分类')}"
 
 
 # ---------------------------------------------------------------- worker
@@ -211,6 +233,8 @@ def init_worker(args):
     G["db"] = connect(read_timeout=1800, write_timeout=1800, autocommit=True)
     cur = G["db"].cursor()
     cur.execute("SET SESSION net_write_timeout = 1800, net_read_timeout = 1800")
+    cur.execute("SELECT task_type, task_kind FROM task_kind_map")
+    G["kind"] = dict(cur.fetchall())
     G["exclude_media"] = set()
     if args["exclude_media"]:
         with open(args["exclude_media"], encoding="utf-8") as f:
@@ -230,12 +254,13 @@ def run_unit(unit):
     for sid, mtype, path in cur.fetchall():
         media[sid].append((mtype, path))
     stats = {"rows": 0, "holdout": 0, "excluded_media": 0, "repaired": 0, "bytes": 0,
-             "written": collections.Counter(), "rejected": collections.Counter(), "media_short": 0}
+             "written": collections.Counter(), "rejected": collections.Counter()}
     outs, rej = {}, None
     part_dir = os.path.join(args["out"], "_parts")
+    default_media = "video" if ctype == "video" else "image"
     ss = db.cursor(pymysql.cursors.SSCursor)
     ss.execute(row_sql, (batch, lo, hi))
-    for rid, fmt, task, hold, media_count, content, text, tconv in ss:
+    for rid, fmt, task, hold, media_count, dcode, dname, content, text, tconv in ss:
         stats["rows"] += 1
         key = f"{batch}:{rid}"
         if hold:
@@ -244,16 +269,16 @@ def run_unit(unit):
         items = media.get(rid, [])
         images = [p for t, p in items if t == "image"]
         videos = [p for t, p in items if t == "video"]
-        reason = None
         if G["exclude_media"] and any(p in G["exclude_media"] for _, p in items):
             stats["excluded_media"] += 1
             continue
+        reason = None
         if media_count is not None and len(items) < media_count:
             reason = f"媒体行缺失（{len(items)}/{media_count}）"
         else:
             try:
-                out_fmt, rec, repaired = convert(fmt, content, text, tconv, images, videos)
-            except (ValueError, json.JSONDecodeError, TypeError, AttributeError, StopIteration) as e:
+                out, rec, repaired = convert(fmt, content, text, tconv, images, videos)
+            except (ValueError, json.JSONDecodeError, TypeError, AttributeError, KeyError, StopIteration) as e:
                 reason = str(e) or e.__class__.__name__
         if reason:
             stats["rejected"][reason] += 1
@@ -264,17 +289,19 @@ def run_unit(unit):
             continue
         if repaired:
             stats["repaired"] += 1
-        if out_fmt == "pt":
-            name = f"{ctype}/pt/{ctype}.pt.jsonl"          # one pt file per corpus type
-            line = {"id": key, **rec}
+        loc = location(ctype, batch, dcode, dname)
+        task_name = task_file(ctype, batch, task, dname)
+        line = {"id": key, **rec}
+        if out == "pt":
+            name = f"{loc}/pt/{task_name}.jsonl"
+        elif not images and not videos and G["kind"].get(task) != "vqa":
+            name = f"{loc}/qa/{task_name}.jsonl"
         else:
-            modality = "mixed" if images and videos else "image" if images else "video" if videos else "text"
-            kind = "qa" if modality == "text" else "vqa"
-            name = f"{ctype}/{kind}/{SOURCE_NAMES.get(batch, batch)}.{out_fmt}.{modality}.jsonl"  # suffix dropped at merge if unique
-            line = {"id": key, **rec}
-            if images:
+            mtype = "mixed" if images and videos else "video" if videos else "image" if images else default_media
+            name = f"{loc}/vqa/{task_name}{'' if mtype == default_media else '.' + mtype}.jsonl"
+            if mtype in ("image", "mixed"):
                 line["images"] = images
-            if videos:
+            if mtype in ("video", "mixed"):
                 line["videos"] = videos
         s = json.dumps(line, ensure_ascii=False) + "\n"
         f = outs.get(name)
@@ -322,29 +349,24 @@ def units_for(plan, bench):
 
 
 def describe(name):
-    """Full part name -> (corpus_type, kind, batch or None, format, modality)."""
-    ctype, kind, base = name.split("/")
+    """Relative file name -> manifest fields."""
+    parts = name.split("/")
+    kind = parts[-2]
+    base = parts[-1][:-len(".jsonl")]
+    task, _, suffix = base.partition(".")
+    ctype = parts[0]
+    domain = "/".join(parts[1:-2])
     if kind == "pt":
-        return ctype, kind, None, "pt", "text"
-    batch, fmt, modality, _ = base.split(".")
-    return ctype, kind, batch, fmt, modality
+        modality = "text"
+    elif kind == "qa":
+        modality = "text"
+    else:
+        modality = suffix or ("video" if ctype == "video" else "image")
+    return {"corpus_type": ctype, "domain": domain, "kind": kind, "task_type": task,
+            "format": "pt" if kind == "pt" else "sharegpt", "modality": modality}
 
 
-def final_names(names):
-    """Drop the modality suffix wherever a batch+format+kind has only one modality."""
-    groups = collections.defaultdict(set)
-    for n in names:
-        ctype, kind, batch, fmt, modality = describe(n)
-        if kind != "pt":
-            groups[(ctype, kind, batch, fmt)].add(modality)
-    out = {}
-    for n in names:
-        ctype, kind, batch, fmt, modality = describe(n)
-        out[n] = n if kind == "pt" or len(groups[(ctype, kind, batch, fmt)]) > 1 else f"{ctype}/{kind}/{batch}.{fmt}.jsonl"
-    return out
-
-
-def merge(out, final):
+def merge(out):
     parts = sorted(os.listdir(os.path.join(out, "_parts")))
     by_name = collections.defaultdict(list)
     for p in parts:
@@ -354,7 +376,7 @@ def merge(out, final):
         if rest.startswith("rejects."):
             dest = os.path.join(out, "_rejects", rest[len("rejects."):])
         else:
-            dest = os.path.join(out, final[rest.replace("__", "/")])
+            dest = os.path.join(out, rest.replace("__", "/"))
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         with open(dest + ".tmp", "wb") as w:
             for p in sorted(files):
@@ -364,46 +386,37 @@ def merge(out, final):
     shutil.rmtree(os.path.join(out, "_parts"))
 
 
-def dataset_info(out, files):
-    """files: final name -> manifest entry (corpus_type, kind, format, modality, ...)."""
-    info = {}
-    for name in sorted(files):
-        meta = files[name]
-        path = os.path.join(out, name)
-        if meta["kind"] == "pt":
-            info[f"field_{meta['corpus_type']}_pt"] = {"file_name": path, "columns": {"prompt": "text"}}
-            continue
-        fmt, modality = meta["format"], meta["modality"]
-        entry = {"file_name": path}
-        if fmt == "alpaca":
-            entry["formatting"] = "alpaca"
-            entry["columns"] = {"prompt": "instruction", "query": "input", "response": "output"}
-        else:
-            entry["formatting"] = "sharegpt"
-            entry["columns"] = {"messages": "conversations" if fmt == "sharegpt" else "messages"}
-            entry["tags"] = SHAREGPT_TAGS if fmt == "sharegpt" else OPENAI_TAGS
-        if modality in ("image", "mixed"):
-            entry["columns"]["images"] = "images"
-        if modality in ("video", "mixed"):
-            entry["columns"]["videos"] = "videos"
-        stem = os.path.basename(name)[:-len(".jsonl")].replace(".", "_")
-        info[f"field_{meta['corpus_type']}_{meta['kind']}_{stem}"] = entry
-    return info
-
-
-def file_entries(out, totals, final):
+def file_entries(out, totals):
     files = {}
     for b, t in totals.items():
-        for full, n in t["written"].items():
-            ctype, kind, _, fmt, modality = describe(full)
-            e = files.setdefault(final[full], {"rows": 0, "corpus_type": ctype, "kind": kind, "format": fmt,
-                                               "modality": modality, "batches": []})
+        for name, n in t["written"].items():
+            e = files.setdefault(name, {"rows": 0, **describe(name), "batches": []})
             e["rows"] += n
             e["batches"].append(b)
     for name, e in files.items():
         e["bytes"] = os.path.getsize(os.path.join(out, name))
         e["batches"] = sorted(set(e["batches"]))
     return dict(sorted(files.items()))
+
+
+def dataset_info(out, files):
+    """Optional LlamaFactory registration (--dataset-info). files: name -> manifest entry."""
+    info = {}
+    for name in sorted(files):
+        meta = files[name]
+        path = os.path.join(out, name)
+        stem = name[:-len(".jsonl")].replace("/", "_").replace(".", "_")
+        if meta["kind"] == "pt":
+            info[f"field_{stem}"] = {"file_name": path, "columns": {"prompt": "text"}}
+            continue
+        entry = {"file_name": path, "formatting": "sharegpt", "columns": {"messages": "conversations"},
+                 "tags": SHAREGPT_TAGS}
+        if meta["modality"] in ("image", "mixed"):
+            entry["columns"]["images"] = "images"
+        if meta["modality"] in ("video", "mixed"):
+            entry["columns"]["videos"] = "videos"
+        info[f"field_{stem}"] = entry
+    return info
 
 
 def main():
@@ -476,25 +489,18 @@ def main():
         return 0
 
     t_merge = time.time()
-    names = set()
-    for t in totals.values():
-        names.update(t["written"])
-    final = final_names(names)
-    merge(a.out, final)
-    files = file_entries(a.out, totals, final)
+    merge(a.out)
+    files = file_entries(a.out, totals)
     if a.dataset_info:
         with open(os.path.join(a.out, "dataset_info.json"), "w", encoding="utf-8") as f:
             json.dump(dataset_info(a.out, files), f, ensure_ascii=False, indent=2)
-    written = {b: collections.Counter() for b in totals}
-    for b, t in totals.items():
-        for full, n in t["written"].items():
-            written[b][final[full]] += n
     manifest = {
         "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "layout": "book/<领域>/<kind>/<task>.jsonl; <type>/<kind>/<task>.jsonl",
         "exclude_batches": exclude, "exclude_media_file": a.exclude_media,
         "elapsed_minutes": {"export": round((t_merge - t0) / 60, 1), "merge": round((time.time() - t_merge) / 60, 1)},
         "batches": {b: {**{k: v for k, v in t.items() if k not in ("written", "rejected")},
-                        "written": dict(written[b]), "rejected": dict(t["rejected"])} for b, t in totals.items()},
+                        "written": dict(t["written"]), "rejected": dict(t["rejected"])} for b, t in totals.items()},
         "files": files,
     }
     with open(os.path.join(a.out, "manifest.json"), "w", encoding="utf-8") as f:
