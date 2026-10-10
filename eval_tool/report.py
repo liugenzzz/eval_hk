@@ -30,7 +30,7 @@ from .breakdown import (
 from .io import excel_safe
 from .length_control import pairwise_length_control, pointwise_length_control
 from .industrial_rubric import INDUSTRIAL_COLUMNS
-from .industrial_report import summarize_industrial, summarize_industrial_status
+from .industrial_report import summarize_industrial, summarize_industrial_status, summarize_industrial_errors
 
 # 达标率之外还值得按维度拆的连续量。四点偏差和 IoU 是连续值，只报一个达标率会丢掉
 # 「差多少」的信息 —— 达标率一样的两个模型，偏差均值可以差一倍。
@@ -121,7 +121,7 @@ def write_reports(
         )
 
         if any(kind.startswith("aircraft_") for kind in (dataset_kinds or {}).values()):
-            from .aircraft_report import summarize_aircraft
+            from .aircraft_report import summarize_aircraft, summarize_aircraft_image_groups
 
             aircraft_metrics = summarize_aircraft(
                 all_details, dataset_kinds or {},
@@ -132,6 +132,11 @@ def write_reports(
                 path = out / "aircraft_metrics.csv"
                 aircraft_metrics.to_csv(path, index=False, encoding="utf-8-sig")
                 written["aircraft_metrics.csv"] = path
+            image_groups = summarize_aircraft_image_groups(all_details, dataset_kinds or {})
+            if not image_groups.empty:
+                path = out / "aircraft_image_groups.csv"
+                image_groups.to_csv(path, index=False, encoding="utf-8-sig")
+                written["aircraft_image_groups.csv"] = path
 
         for model, table in make_cross_tables(all_details).items():
             path = out / f"cross_{_safe_name(model)}.csv"
@@ -236,8 +241,10 @@ def _write_breakdowns(
             bootstrap_n=bootstrap_n, seed=seed,
         )
         industrial_status = summarize_industrial_status(all_details, datasets=industrial_keys)
+        industrial_errors = summarize_industrial_errors(all_details, datasets=industrial_keys)
         for filename, table in (("industrial_quality_scores.csv", industrial_scores),
-                                ("industrial_judge_status.csv", industrial_status)):
+                                ("industrial_judge_status.csv", industrial_status),
+                                ("industrial_judge_errors.csv", industrial_errors)):
             path = out / filename
             table.to_csv(path, index=False, encoding="utf-8-sig")
             written[filename] = path

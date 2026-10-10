@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from eval_tool.industrial_report import summarize_industrial
+from eval_tool.industrial_report import summarize_industrial, summarize_industrial_errors
 
 
 def test_language_groups_and_nullable_scores_do_not_change_other_datasets():
@@ -90,3 +90,15 @@ def test_unscored_references_are_visible_without_becoming_zero_scores(tmp_path):
                             dataset_kinds={"industrial_en": "industrial_describe"})
     assert pd.read_csv(written["industrial_quality_scores.csv"]).empty
     assert pd.read_csv(written["industrial_judge_status.csv"]).n_total.max() == 4
+
+
+def test_error_rates_require_status_labels_on_scored_rows():
+    details = pd.DataFrame([{
+        "model": "base", "dataset": "industrial_zh", "quality_score": 20,
+        "industrial_reference_status": "usable", "industrial_critical_errors": "missed_defect",
+    }])
+    legacy = summarize_industrial_errors(details)
+    assert legacy.empty and "rate" in legacy.columns
+    details["meta.defect_status"] = [None]
+    with pytest.raises(ValueError, match="incomplete meta.defect_status"):
+        summarize_industrial_errors(details)

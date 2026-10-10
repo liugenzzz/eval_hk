@@ -20,7 +20,7 @@ METRICS = (
 )
 ATTRIBUTES = (
     "object_category", "source_domain", "defect_type", "defect_form",
-    "defect_location", "defect_status",
+    "defect_location", "defect_status", "defect_bucket",
 )
 
 
@@ -89,6 +89,53 @@ def summarize_industrial_status(
                 "n_judge_error": int(failed.sum()), "n_missing_prediction": int(missing.sum()),
                 "n_other_unscored": int((~(scored | conflict | insufficient | failed | missing)).sum()),
             })
+    return pd.DataFrame(rows)
+
+
+def summarize_industrial_errors(
+    details: pd.DataFrame, *, datasets: tuple[str, ...] = ("industrial_zh", "industrial_en"),
+) -> pd.DataFrame:
+    """Report judge attributions on scored, usable references with explicit denominators."""
+    frame = details[details["dataset"].isin(datasets)].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    for name in ("quality_score", "industrial_reference_status"):
+        if name not in frame:
+            raise ValueError(f"details must contain {name}")
+    frame = frame[pd.to_numeric(frame["quality_score"], errors="coerce").notna()
+                  & frame["industrial_reference_status"].eq("usable")].copy()
+    if frame.empty:
+        return pd.DataFrame()
+    if "meta.defect_status" not in frame:
+        return pd.DataFrame(columns=["model", "dataset", "dim", "value", "flag",
+                                     "n_eligible", "n_flagged", "rate"])
+    if frame["meta.defect_status"].isna().any():
+        raise ValueError("scored industrial details have incomplete meta.defect_status")
+    if "industrial_critical_errors" not in frame:
+        raise ValueError("details must contain industrial_critical_errors for scored rows")
+    flags = ("missed_defect", "false_alarm", "wrong_object", "wrong_defect_type")
+    rows = []
+    groups = [("overall", "all", frame)]
+    for field in ("defect_status", "defect_bucket", "object_category", "source_domain"):
+        column = f"meta.{field}"
+        if column in frame:
+            groups.extend((field, str(value), group) for value, group in
+                          frame.groupby(column, dropna=False))
+    for dim, value, group in groups:
+        for (model, dataset), part in group.groupby(["model", "dataset"], dropna=False):
+            status = part.get("meta.defect_status", pd.Series("", index=part.index))
+            parsed = part["industrial_critical_errors"].fillna("").astype(str).map(
+                lambda text: set(text.split(",")) if text else set()
+            )
+            for flag in flags:
+                eligible = status.eq("abnormal") if flag in {"missed_defect", "wrong_defect_type"} else (
+                    status.eq("normal") if flag == "false_alarm" else pd.Series(True, index=part.index)
+                )
+                denominator = int(eligible.sum())
+                n_flagged = int(parsed[eligible].map(lambda found: flag in found).sum())
+                rows.append({"model": model, "dataset": dataset, "dim": dim, "value": value,
+                             "flag": flag, "n_eligible": denominator, "n_flagged": n_flagged,
+                             "rate": n_flagged / denominator if denominator else None})
     return pd.DataFrame(rows)
 
 

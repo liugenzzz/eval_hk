@@ -6,7 +6,7 @@
 
 ---
 
-## 这个工具现在评四样东西
+## 当前评估链路
 
 | 领域 | 评什么 | 数据集 | 打分方式 | 详细文档 |
 |---|---|---|---|---|
@@ -14,8 +14,11 @@
 | **书籍** | 同上，换一批书籍领域的数据 | 自己命名，如 `book_mcq` / `book_vqa` | **与装备完全相同** —— 同一套 kind、同一套提示词、同一套报表维度 | 同上 |
 | **工业质检** | 工业物体与缺陷描述，中英文分开、按物体类型出分 | `industrial_zh` / `industrial_en` | 独立 industrial_v1 pointwise：物体、缺陷、外观、位置；不运行 pairwise | [工业质检评估](docs/guides/工业质检评估_使用说明.md) |
 | **目标检测** | 指代定位、多框检测、物体识别、计数、清单、拒答、区域描述 | `eval_set_v1`（构建端产出的 `test.jsonl`） | 九个纯代码打分器 + 一个裁判打分器 | **[目标检测评估](docs/目标检测评估.md)** |
+| **飞机缺陷** | 缺陷存在、类别、定位、拒答与区域 | `aircraft_eval_v2` | 代码验收分；报告另按飞机图和工业图拆分 | [评估口径与现状](docs/评估口径与现状.md) |
+| **期刊** | 页面、版面、图表和跨页问答 | `journal_vqa` | `doc_v2` 裁判，任务类型等权合格率 | [评估口径与现状](docs/评估口径与现状.md) |
+| **园区视频** | 现有通用视频问答；独立的异常事件评估待人工标注 | `park_video` | 选择题 CircularEval 与开放问答裁判；异常事件单列 | [园区异常事件评估](tools/PARK_ABNORMAL_EVAL.md) |
 
-四个领域使用同一套评分框架。工业质检复用推理与 pointwise 基础设施，使用独立 kind、提示词和评分口径，并提供训练 JSONL 抽取及维度汇总工具。目标检测多了一批打分器和报表维度。工业质检的物体类别用于分组，物体、缺陷、外观、位置用于逐条评分，不能将裁判维度分直接当作分类准确率。
+各链路复用同一套推理与报告基础设施，评分规则分别配置。工业质检的物体类别用于分组，物体、缺陷、外观、位置用于逐条评分，不能将裁判维度分直接当作分类准确率。对外链路名称保持稳定；实验版本使用独立输出目录，历史报告保留。
 
 工业质检当前流程：`industrial_extract` 从 `merged_zh.jsonl` / `merged_en.jsonl` 各抽 500 条，输出一个 `industrial_eval.jsonl`；用 `industrial_mixed.example.json` 配置推理、评分。两个语言切片分别选行，不会重复处理整份文件。每种语言内部同图最多一问，两种语言可以共享图片；训练数据抽取成绩属于回归评估。完整命令、标签映射与可选严格配对流程见[工业质检指南](docs/guides/工业质检评估_使用说明.md)。
 
@@ -395,7 +398,8 @@ jsonl 走评估集通路：metadata 扁平化成 `meta.*` 列，多轮记录按�
 | `detail_{model}_{dataset}.xlsx` | 逐条明细，不写入 base64 图片 |
 | `pairwise_vs_baseline.csv` | 各模型 vs 基准的胜/平/负率 |
 | **`breakdown.csv`** | 模型 × 数据集 × 维度 × 取值 × 指标，每格带 `n` / CI / `status`。指标含裁判的 `quality_score`（0-100 原分）和 `hit`（通过率） |
-| `industrial_quality_scores.csv` / `industrial_judge_status.csv` | 工业质检专用：各评分维度汇总，以及有效/参考冲突/证据不足/裁判失败计数 |
+| `industrial_quality_scores.csv` / `industrial_judge_status.csv` / `industrial_judge_errors.csv` | 工业质检专用：各评分维度、有效/参考冲突/证据不足/裁判失败计数，以及裁判归因的漏检、误报、对象错、类型错；标记率不是检测器召回率 |
+| `aircraft_image_groups.csv` | 飞机缺陷专用：按飞机图/工业图拆分的切片得分和样本数；原验收分仍按既定权重计算 |
 | **`failure_buckets.csv`** | 达标率 + 三个失败桶 |
 | **`acceptance_score.csv`** | 验收总分，只由 `engine="code"` 的数据集加权构成 |
 | **`paired_diff_vs_baseline.csv`** | 相对 base 的**配对** bootstrap 差值与区间 |

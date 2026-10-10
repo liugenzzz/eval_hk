@@ -11,6 +11,95 @@ from .aggregate import bootstrap_mean_ci
 
 
 CLASSES = ("fastener_missing", "crack", "corrosion", "dent", "scratch")
+ACCEPTANCE_DATASETS = (
+    "aircraft_presence", "aircraft_category", "aircraft_grounding",
+    "aircraft_refusal", "aircraft_region",
+)
+INDUSTRIAL_IMAGE_DATASETS = frozenset({
+    "visa", "real_iad", "mvtec_ad_screw", "mvtec_loco_screwbag",
+})
+AIRCRAFT_IMAGE_DATASETS = frozenset({
+    "aircraft_skin_defects", "uts_aircraft_defect",
+    "mm_general_aircraft_image_level", "sutd_aircraft_ai_v4",
+    "priority_aircraft_curated", "corrosion_cs_vt",
+    "synthetic_panel", "synthetic_closeup",
+})
+
+
+def summarize_aircraft_image_groups(
+    details: pd.DataFrame, kinds: Mapping[str, str],
+) -> pd.DataFrame:
+    """Report v2 image provenance separately without changing its headline score.
+
+    Each scored turn is one observation, matching the existing task summaries.
+    ``n_records`` additionally counts original questions so multi-turn examples do
+    not masquerade as independent questions.
+    """
+    keys = {key for key, kind in kinds.items() if kind.startswith("aircraft_")}
+    if details.empty or not keys:
+        return pd.DataFrame()
+    data = details.loc[details["dataset"].isin(keys)].copy()
+    if data.empty:
+        return pd.DataFrame()
+    source_col = "meta.source_dataset"
+    if source_col not in data:
+        raise ValueError("Aircraft subgroup report requires meta.source_dataset")
+    sources = data[source_col].dropna().unique()
+    unknown = sorted({str(s) for s in sources} - INDUSTRIAL_IMAGE_DATASETS - AIRCRAFT_IMAGE_DATASETS)
+    if data[source_col].isna().any() or unknown:
+        raise ValueError(f"Unclassified aircraft image sources: {unknown}; missing={data[source_col].isna().sum()}")
+    data["image_group"] = data[source_col].map(
+        lambda s: "industrial_image" if s in INDUSTRIAL_IMAGE_DATASETS else "aircraft_image"
+    )
+    data["record_id"] = data["index"].astype(str).str.replace(r"__t\d+$", "", regex=True)
+    rows = []
+    for (model, image_group, dataset), frame in data.groupby(
+        ["model", "image_group", "dataset"], dropna=False
+    ):
+        for metric in ("hit", "quality_score"):
+            if metric not in frame:
+                continue
+            valid = pd.to_numeric(frame[metric], errors="coerce").dropna()
+            if valid.empty:
+                continue
+            rows.append({
+                "model": model, "image_group": image_group, "dataset": dataset,
+                "metric": metric, "score": round(float(valid.mean()), 4) if len(valid) else math.nan,
+                "n_scored": len(valid), "n_turns": len(frame),
+                "n_records": frame["record_id"].nunique(),
+            })
+    for (model, image_group), frame in data.groupby(["model", "image_group"], dropna=False):
+        for metric in ("hit", "quality_score"):
+            if metric not in frame:
+                continue
+            valid = pd.to_numeric(frame[metric], errors="coerce").dropna()
+            if valid.empty:
+                continue
+            rows.append({
+                "model": model, "image_group": image_group, "dataset": "all_tasks",
+                "metric": metric, "score": round(float(valid.mean()), 4) if len(valid) else math.nan,
+                "n_scored": len(valid), "n_turns": len(frame),
+                "n_records": frame["record_id"].nunique(),
+                "status": "descriptive_row_mean",
+            })
+        weighted = frame.loc[frame["dataset"].isin(ACCEPTANCE_DATASETS)].copy()
+        scored = pd.to_numeric(weighted["hit"], errors="coerce")
+        weighted = weighted.loc[scored.notna()].copy()
+        weighted["hit"] = scored.loc[scored.notna()]
+        per_dataset = weighted.groupby("dataset")["hit"].mean()
+        missing = sorted(set(ACCEPTANCE_DATASETS) - set(per_dataset.index))
+        rows.append({
+            "model": model, "image_group": image_group,
+            "dataset": "acceptance_score", "metric": "hit",
+            "score": round(float(per_dataset.loc[list(ACCEPTANCE_DATASETS)].mean()), 4)
+                     if not missing else math.nan,
+            "n_scored": len(weighted), "n_turns": len(frame.loc[frame["dataset"].isin(ACCEPTANCE_DATASETS)]),
+            "n_records": weighted["record_id"].nunique(),
+            "n_images": weighted["source_id"].nunique() if "source_id" in weighted else math.nan,
+            "status": "complete" if not missing else "missing_weighted_slice",
+            "missing_datasets": ",".join(missing),
+        })
+    return pd.DataFrame(rows)
 
 
 def _metric(

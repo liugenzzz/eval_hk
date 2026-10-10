@@ -6,6 +6,7 @@ import math
 import os
 import re
 import socket
+import ctypes
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -137,7 +138,18 @@ class InferenceLock:
         if owner.get("host") != socket.gethostname():
             return False
         try:
-            os.kill(int(owner.get("pid", "")), 0)
+            pid = int(owner.get("pid", ""))
+            if os.name == "nt":
+                kernel = ctypes.windll.kernel32
+                handle = kernel.OpenProcess(0x1000, False, pid)
+                if not handle:
+                    return kernel.GetLastError() == 87
+                try:
+                    exit_code = ctypes.c_ulong()
+                    return bool(kernel.GetExitCodeProcess(handle, ctypes.byref(exit_code))) and exit_code.value != 259
+                finally:
+                    kernel.CloseHandle(handle)
+            os.kill(pid, 0)
         except ProcessLookupError:
             return True
         except (ValueError, PermissionError, OverflowError):
